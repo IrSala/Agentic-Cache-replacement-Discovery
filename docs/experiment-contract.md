@@ -1,0 +1,87 @@
+# Experiment contract (v0)
+
+**Status: agreed, not yet implemented.** This records the BUILD_PLAN Phase 0 decisions so later phases build against one definition. The code arrives in Phase 3 (evaluator) and Phase 4 (OpenEvolve config).
+
+Scope: evolve the **LLC replacement policy** of ChampSim at the pinned commit. Everything else stays fixed: `configs/champsim/baseline.json`, which is ChampSim's default single-core config with no prefetchers.
+
+## 1. Candidate format
+
+- A candidate is **one self-contained C++ header**, `evolved_repl.h`, defining `class evolved_repl : public champsim::modules::replacement` fully inline.
+- The hooks match the module API at the pinned commit (see `external/ChampSim/replacement/lru/lru.h`):
+  - required: `find_victim` and `update_replacement_state`
+  - optional: `replacement_cache_fill`, `initialize_replacement` and `replacement_final_stats`
+- `// EVOLVE-BLOCK-START` and `// EVOLVE-BLOCK-END` wrap the whole class body (state, constructors, hooks). The includes, the class head and the closing `};` stay outside the block.
+- Why header-only:
+  - OpenEvolve evolves a single file.
+  - ChampSim includes every `.h` in a module directory and accepts a directory with no `.cc` files.
+  - The module's class name must equal its directory name.
+- How it is built: the evaluator places the file at `<workspace>/repl/evolved_repl/evolved_repl.h` and runs `config.sh --replacement-dir <workspace>/repl` with `LLC.replacement = "evolved_repl"`. This is ChampSim's standard out-of-tree module mechanism, with no source edits.
+- A candidate's identity is the sha256 of its file. Candidate files are immutable once written.
+- The seed is an exact port of stock `lru`, so its fitness must be exactly 1.0.
+- Static checks reject a candidate as `invalid_candidate` when:
+  - it exceeds the size limit
+  - an EVOLVE-BLOCK marker is missing
+  - the `evolved_repl` class declaration is missing
+
+## 2. Experiment manifest
+
+There is one hand-written JSON file per experiment, `configs/experiments/<experiment_id>.json`. It is immutable once a campaign uses it.
+
+| key | content |
+|---|---|
+| `contract_version`, `experiment_id`, `purpose` | identification |
+| `champsim` | `repo`, `commit`, `base_config`, `target_cache: "LLC"`, `module_name: "evolved_repl"` |
+| `simulation` | `warmup_instructions`, `simulation_instructions` |
+| `baseline` | `policy: "lru"` |
+| `traces` | list of `{id, path, sha256}`; traces live outside the repo |
+| `limits` | `build_timeout_s`, `run_timeout_s`, `max_source_bytes` |
+| `fitness` | `name: "geomean_ipc_speedup"`, `version` |
+
+**Trace set for now:** `602.gcc_s-1850B` at 1M warmup / 5M simulated instructions, for **plumbing only**. On this trace the LLC hit rate is about 0.3%, and LRU, SRRIP, DRRIP and SHIP land within 0.2% IPC of each other, so fitness is flat.
+
+**Phase 2:** calibrate a set of LLC-sensitive traces (SPEC2017 DPC-3). A trace is admitted only if the built-in policies differ by at least 1% IPC on it.
+
+## 3. Result schema
+
+There is one JSON record per (candidate, trace). Every pair in the manifest gets exactly one record; a compile failure writes one `compile_failed` record per trace.
+
+- **Identity:** `schema_version`, `experiment_id`, `experiment_sha256`, `campaign_id`, `generation`, `candidate_id`, `candidate_sha256`, `trace_id`.
+- **Outcome:** `status`, `failure_class`, `error_summary`, `exit_code`, `build_seconds`, `run_seconds`.
+- **Metrics:** `ipc`, `instructions`, `cycles`, `llc_demand_mpki`, `llc_hit_rate`.
+  - They are flat and non-null exactly when `status == "completed"`.
+  - They come from the ROI section of ChampSim's `--json` output, never from stdout.
+- **Provenance:**
+  - `logs`: build log, run log and ChampSim JSON path
+  - `env`: `champsim_commit`, `base_config_sha256`, `config_sha256`, `project_git_commit`, `hostname`, `cxx_version`, `slurm_job_id`, `slurm_array_task_id`
+  - `started_at` and `finished_at`
+
+Baselines use the same schema (stock `lru`, at `baselines/<experiment_id>/<trace_id>.json`).
+
+## 4. Fitness
+
+```
+speedup_t      = ipc_candidate_t / ipc_lru_t
+combined_score = geometric_mean(speedup_t)   if every trace completed   (1.0 = LRU parity)
+               = 0.0                         if any trace has a candidate-class failure
+```
+
+- `combined_score` is the only fitness key OpenEvolve sees.
+- A missing baseline, a missing record or any `infra_error` raises an error instead of producing a score.
+- ChampSim is deterministic for a fixed binary, config and trace, so each pair runs once.
+
+## 5. Failure policy
+
+| status | class | combined_score | retried | Slurm exit (Phase 5+) |
+|---|---|---|---|---|
+| `completed` | none | geomean | n/a | 0 |
+| `invalid_candidate` | candidate | 0.0 | no | 0 |
+| `compile_failed` | candidate | 0.0 | no | 0 |
+| `runtime_failed` (non-zero exit / signal) | candidate | 0.0 | no | 0 |
+| `timeout` (evaluator kills the process group) | candidate | 0.0 | no | 0 |
+| `infra_error` (missing trace or baseline, unparseable output after exit 0, filesystem) | infra | raise | OpenEvolve `max_retries: 1` | non-zero |
+
+- **Candidate failures** never stop a campaign. The tail of the compiler or ChampSim stderr goes back to OpenEvolve as `artifacts`, so the LLM sees why the candidate failed.
+- **Infrastructure failures** stop the stage. A preflight check runs before any candidate. It verifies the manifest, the trace hashes and the baselines, and checks that the seed reproduces LRU cycles exactly.
+- **Known gap:** OpenEvolve stores a raised error as a 0-scored program. `infra_error` records make these auditable, and the Phase 4 controller must halt on them.
+- **Subprocess timeouts:** OpenEvolve's own `evaluator.timeout` does not kill subprocesses, so the evaluator enforces its own.
+- **Untrusted code:** candidate code runs only inside Slurm allocations, never on the login node.

@@ -1,0 +1,2 @@
+# Evaluator venv: runs ChampSim's config.sh and (later) the candidate evaluator.
+# Standard library only for now; add evaluator dependencies here, then run `make lock`.
