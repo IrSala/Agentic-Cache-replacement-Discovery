@@ -27,7 +27,7 @@ git clone --recurse-submodules <repo-url> AFAR_HPC
 cd AFAR_HPC && make setup
 ```
 
-`make setup` takes about 15 minutes the first time. It needs no Slurm allocation; builds run on the login node with `-j2`. Each step runs in order and stops at the first failure:
+`make setup` took about 3 minutes in testing, with vcpkg's binary cache (`~/.cache/vcpkg`) already populated. It takes longer the first time an account has to compile the vcpkg libraries. It needs no Slurm allocation; builds run on the login node with `-j2`. Each step runs in order and stops at the first failure:
 1. fetch the submodules
 2. create `.venv/controller` and `.venv/evaluator` from the lock files
 3. install ChampSim's C++ dependencies with vcpkg

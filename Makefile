@@ -1,6 +1,6 @@
 # AFAR_HPC: reproducible OpenEvolve + ChampSim environment.
 #
-#     make setup                  # first-time setup (about 15 min)
+#     make setup                  # first-time setup (a few minutes)
 #     make smoke TRACE=<path>     # optional seconds-long ChampSim run
 #     source env/activate.sh      # modules + controller venv in your shell
 #
