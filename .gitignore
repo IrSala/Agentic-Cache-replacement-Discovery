@@ -1,5 +1,6 @@
 # Python virtual environments (recreate with `make venvs`)
 .venv/
+.python/
 __pycache__/
 *.pyc
 

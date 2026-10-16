@@ -52,10 +52,7 @@ probe 'type module >/dev/null 2>&1 || source /etc/profile.d/lmod.sh; module avai
 probe 'command -v gcc g++ git; gcc --version | head -1; git --version'
 probe 'which apptainer singularity'
 
-section "AFAR_HPC environment"
-probe 'source env/modules.sh && module -t list && python3 --version && g++ --version | head -1'
-probe '.venv/controller/bin/python -c "import sys, openevolve, numpy; print(sys.version.split()[0], \"openevolve ok\")"'
-probe 'build/baseline/champsim --help > /dev/null && echo "champsim binary ok"'
-probe 'ldd build/baseline/champsim | grep -E "not found|libstdc"'
+section "AFAR_HPC run-time checks (clean environment, no modules)"
+probe 'env -i HOME="$HOME" USER="$USER" PATH=/usr/bin:/bin bash env/check.sh --runtime'
 
 section "Done"

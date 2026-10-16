@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Print a snapshot of the working environment.
 #
-# Usage: make env-record   (loads env/modules.sh, writes env/versions.txt)
+# Usage: make env-record   (on coe-hpc1, with env/modules.sh loaded; writes env/versions.txt)
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source env/python.pin
 
 champsim=external/ChampSim
 
@@ -13,16 +14,21 @@ echo "host:        $(hostname)"
 echo "os:          $(cat /etc/redhat-release 2>/dev/null || uname -s)"
 echo "kernel:      $(uname -r)"
 echo "glibc:       $(ldd --version | head -1)"
-echo "python:      $(python3 --version 2>&1)"
+echo
+echo "Build tools (env/modules.sh, coe-hpc1 only):"
 echo "g++:         $(g++ --version | head -1)"
 echo "git:         $(git --version)"
 echo "make:        $(make --version | head -1)"
+echo "apptainer:   $(apptainer --version)"
+echo
+echo "Run-time (shared storage, both clusters):"
+echo "python:      $(.python/bin/python3 --version) (python-build-standalone ${PBS_RELEASE})"
+echo "openevolve:  $(.venv/controller/bin/python -c 'import importlib.metadata as m; print(m.version("openevolve"))')"
 echo "champsim:    $(git -C "$champsim" rev-parse HEAD) ($(git -C "$champsim" describe --tags --always))"
 echo "vcpkg:       $(git -C "$champsim/vcpkg" rev-parse HEAD)"
-echo "openevolve:  $(.venv/controller/bin/python -c 'import importlib.metadata as m; print(m.version("openevolve"))')"
 echo
 echo "vcpkg packages:"
 (cd "$champsim" && ./vcpkg/vcpkg list) | sed 's/^/  /'
 echo
 echo "disk usage:"
-du -sh .venv/controller .venv/evaluator "$champsim/vcpkg" "$champsim/vcpkg_installed" build 2>/dev/null | sed 's/^/  /'
+du -sh .python .venv/controller .venv/evaluator "$champsim/vcpkg" "$champsim/vcpkg_installed" build 2>/dev/null | sed 's/^/  /'
