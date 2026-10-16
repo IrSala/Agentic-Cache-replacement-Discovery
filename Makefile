@@ -17,6 +17,10 @@ include env/python.pin
 
 JOBS  ?= 2
 TRACE ?=
+# OpenEvolve runs: output directory, optional resume checkpoint and iteration count.
+OUT        ?= runs/toy-manual
+CHECKPOINT ?=
+ITERATIONS ?=
 
 CHAMPSIM_DIR    := external/ChampSim
 BASELINE_CONFIG := configs/champsim/baseline.json
@@ -42,7 +46,7 @@ PIP_FLAGS := --quiet --disable-pip-version-check --only-binary=:all:
 CHAMPSIM_LDFLAGS := -static-libstdc++ -static-libgcc
 
 .PHONY: help setup submodules python venvs vcpkg champsim check check-runtime smoke \
-        env-record lock clean distclean oe-check-config
+        env-record lock clean distclean oe-check-config oe-toy-manual
 
 help: ## Show this help
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -98,6 +102,14 @@ smoke: ## Run 10K+10K instructions of TRACE=<path> through the baseline binary
 
 oe-check-config: venvs ## Load configs/openevolve/*.yaml with OpenEvolve's loader; flag unknown keys
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python scripts/oe_check_config.py configs/openevolve/*.yaml
+
+# OpenEvolve's own example with llm.manual_mode: each prompt is written to
+# $(OUT)/manual_tasks_queue/<id>.json and the run waits for <id>.answer.json.
+oe-toy-manual: venvs ## Toy OpenEvolve run with no LLM (OUT=, CHECKPOINT=, ITERATIONS=)
+	$(RUN_ENV) $(VENV_DIR)/controller/bin/openevolve-run \
+	    examples/function_minimization/initial_program.py examples/function_minimization/evaluator.py \
+	    --config configs/openevolve/toy-manual.yaml --output $(OUT) \
+	    $(if $(CHECKPOINT),--checkpoint $(CHECKPOINT)) $(if $(ITERATIONS),--iterations $(ITERATIONS))
 
 env-record: ## Write env/modules.lock.txt and env/versions.txt
 	$(BUILD_ENV) module -t list > env/modules.lock.txt 2>&1

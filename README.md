@@ -106,6 +106,7 @@ Anything longer than `make smoke` belongs in a Slurm job, not on a login node.
 | `check-runtime` | only the run-time checks, in a clean environment |
 | `smoke TRACE=…` | 10K warmup + 10K simulated instructions, JSON output parsed |
 | `oe-check-config` | load `configs/openevolve/*.yaml` with OpenEvolve's loader; fail on unknown keys |
+| `oe-toy-manual` | run OpenEvolve's toy example with no LLM (`llm.manual_mode`). Each prompt appears as `$(OUT)/manual_tasks_queue/<id>.json`; answer it by writing `<id>.answer.json` containing `{"answer": "<SEARCH/REPLACE diff>"}`. Options: `OUT=`, `CHECKPOINT=<dir>` to resume, `ITERATIONS=` (counted from the checkpoint) |
 | `env-record` | rewrite `env/modules.lock.txt` and `env/versions.txt` |
 | `lock` | re-resolve `env/*-requirements.in` into the `.txt` locks (needs internet) |
 | `clean` / `distclean` | remove build outputs / also `.python/`, the venvs and `vcpkg_installed/` |
