@@ -6,10 +6,12 @@ __pycache__/
 # Build outputs (recreate with `make champsim`)
 build/
 
-# Experiment outputs (later phases)
+# Experiment outputs (later phases); logs/ exists so sbatch --output can write there
 campaigns/
 results/
-logs/
+runs/
+logs/*
+!logs/.gitkeep
 
 # Traces are large; keep them outside the repo and reference them by path
 *.champsimtrace

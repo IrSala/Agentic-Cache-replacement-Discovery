@@ -26,7 +26,7 @@ MODULES := source env/modules.sh &&
 PIP_FLAGS := --quiet --disable-pip-version-check --only-binary=:all:
 
 .PHONY: help setup submodules venvs vcpkg champsim check smoke env-record \
-        lock modules-save clean distclean
+        lock modules-save clean distclean oe-check-config
 
 help: ## Show this help
 	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-14s %s\n", $$1, $$2}'
@@ -62,6 +62,9 @@ smoke: ## Run 10K+10K instructions of TRACE=<path> through the baseline binary
 	    --json build/smoke.json "$(TRACE)" > build/smoke.log
 	$(MODULES) $(VENV_DIR)/evaluator/bin/python -c 'import json; roi = json.load(open("build/smoke.json"))[-1]["roi"]["cores"][0]; \
 	    print("smoke ok:", roi["instructions"], "instructions,", roi["cycles"], "cycles")'
+
+oe-check-config: venvs ## Load configs/openevolve/*.yaml with OpenEvolve's loader; flag unknown keys
+	$(MODULES) $(VENV_DIR)/controller/bin/python scripts/oe_check_config.py configs/openevolve/*.yaml
 
 env-record: ## Write env/modules.lock.txt and env/versions.txt
 	$(MODULES) module -t list > env/modules.lock.txt 2>&1
