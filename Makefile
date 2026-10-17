@@ -21,6 +21,8 @@ TRACE ?=
 OUT        ?= runs/toy-manual
 CHECKPOINT ?=
 ITERATIONS ?=
+# make llm-fetch: which pinned LLM assets to download.
+LLM_PARTS  ?= sandbox model
 
 CHAMPSIM_DIR    := external/ChampSim
 BASELINE_CONFIG := configs/champsim/baseline.json
@@ -46,10 +48,10 @@ PIP_FLAGS := --quiet --disable-pip-version-check --only-binary=:all:
 CHAMPSIM_LDFLAGS := -static-libstdc++ -static-libgcc
 
 .PHONY: help setup submodules python venvs vcpkg champsim check check-runtime smoke \
-        env-record lock clean distclean oe-check-config oe-toy-manual
+        env-record lock clean distclean oe-check-config oe-toy-manual llm-fetch
 
 help: ## Show this help
-	@grep -E '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-16s %s\n", $$1, $$2}'
+	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-16s %s\n", $$1, $$2}'
 
 setup: submodules python venvs vcpkg champsim check ## Full first-time setup (coe-hpc1)
 
@@ -110,6 +112,9 @@ oe-toy-manual: venvs ## Toy OpenEvolve run with no LLM (OUT=, CHECKPOINT=, ITERA
 	    examples/function_minimization/initial_program.py examples/function_minimization/evaluator.py \
 	    --config configs/openevolve/toy-manual.yaml --output $(OUT) \
 	    $(if $(CHECKPOINT),--checkpoint $(CHECKPOINT)) $(if $(ITERATIONS),--iterations $(ITERATIONS))
+
+llm-fetch: venvs ## Download the pinned model and unpack the vLLM sandbox into AFAR_ASSETS (LLM_PARTS=; needs internet)
+	$(BUILD_ENV) scripts/llm_fetch.sh $(LLM_PARTS)
 
 env-record: ## Write env/modules.lock.txt and env/versions.txt
 	$(BUILD_ENV) module -t list > env/modules.lock.txt 2>&1

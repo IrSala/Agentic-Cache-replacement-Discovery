@@ -16,3 +16,5 @@ export AFAR_ASSETS="${AFAR_ASSETS:-/data/cmpe295-bond/${USER}/afar}"
 # Keep Apptainer's layer cache and build space off /home.
 export APPTAINER_CACHEDIR="${AFAR_ASSETS}/apptainer/cache"
 export APPTAINER_TMPDIR="${AFAR_ASSETS}/apptainer/tmp"
+# Keep Hugging Face's cache and metadata off /home too.
+export HF_HOME="${AFAR_ASSETS}/huggingface"
