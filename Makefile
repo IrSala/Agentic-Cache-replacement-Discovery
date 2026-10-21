@@ -102,8 +102,9 @@ smoke: ## Run 10K+10K instructions of TRACE=<path> through the baseline binary
 	$(RUN_ENV) $(VENV_DIR)/evaluator/bin/python -c 'import json; roi = json.load(open("build/smoke.json"))[-1]["roi"]["cores"][0]; \
 	    print("smoke ok:", roi["instructions"], "instructions,", roi["cycles"], "cycles")'
 
+# Configs reference ${AFAR_LLM_API_KEY}, which GPU jobs set; any value lets them load here.
 oe-check-config: venvs ## Load configs/openevolve/*.yaml with OpenEvolve's loader; flag unknown keys
-	$(RUN_ENV) $(VENV_DIR)/controller/bin/python scripts/oe_check_config.py configs/openevolve/*.yaml
+	$(RUN_ENV) AFAR_LLM_API_KEY=validation-only $(VENV_DIR)/controller/bin/python scripts/oe_check_config.py configs/openevolve/*.yaml
 
 # OpenEvolve's own example with llm.manual_mode: each prompt is written to
 # $(OUT)/manual_tasks_queue/<id>.json and the run waits for <id>.answer.json.

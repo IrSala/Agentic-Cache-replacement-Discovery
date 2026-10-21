@@ -9,7 +9,7 @@ checkpoint_interval: 5
 llm:
   primary_model: "afar-llm"                # name the local server exposes (configs/llm/serve.env)
   api_base: "http://127.0.0.1:8000/v1"     # default only; jobs override with --api-base
-  api_key: "local-no-auth"                 # the server has no auth, but the OpenAI client needs a value
+  api_key: "${AFAR_LLM_API_KEY}"           # random per job, exported by slurm/llm_serve.sh
   temperature: 0.7
   max_tokens: 4096                         # leaves room for the prompt in a 7B model's context window
   timeout: 300

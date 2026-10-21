@@ -52,6 +52,39 @@ What works is Apptainer's documented sandbox-then-SIF workflow:
 
 The `vllm` command-line tool needs a GPU to detect: on a CPU node it fails with "Failed to infer device type". So `vllm serve` is first exercised by the GPU jobs.
 
-## Measurements (R5, R6)
+## Running the server (R5)
 
-To be filled in: server load time, tokens/s, and seconds per OpenEvolve iteration.
+`slurm/llm_serve.sh` runs vLLM as a sidecar inside the GPU job:
+- It binds to `127.0.0.1` on a port derived from the job ID.
+- It requires a random per-job API key, passed through the environment because command lines are visible to every user on the node.
+- Caches go to node-local `/tmp/$USER/afar-llm` (mode 0700), and the server is stopped when the job exits.
+- `llm_gpu_preflight` checks the allocated GPU first.
+
+`AFAR_LLM_FAKE=1` swaps in `scripts/fake_llm_server.py`, so job scripts can be tested on coe-hpc1.
+
+**Remaining exposure:** on a shared node, other users can reach `127.0.0.1`. vLLM's key protects only the `/v1`-style endpoints, and some others can run inference without it (vLLM security docs). The mitigation is that the port and key are random per job and the server lives only as long as the job.
+
+**GPU numbering:** cs nodes don't hide unallocated GPUs from `nvidia-smi`, so all four are listed. `CUDA_VISIBLE_DEVICES`, which `--nv` passes through, is what confines vLLM to the allocated GPU. `CUDA_DEVICE_ORDER=PCI_BUS_ID` is set inside the container so that CUDA's numbering matches `nvidia-smi`'s.
+
+### R5 attempts
+
+| Job | Node / GPU | Result |
+|---|---|---|
+| 93353 (2026-10-21) | `cs002`, GPU 0 (bus `00000000:17:00.0`) | **GPU fault, not our setup.** Everything up to the first GPU call worked: `vllm --version` reported 0.30.0, the SIF ran with `--nv`, `/model` bound read-only, the flags were accepted, and `Qwen2ForCausalLM` resolved. The engine then failed on its first GPU memory query with `CUDA error: CUDA-capable device(s) is/are busy or unavailable`. E2's report shows this exact GPU with **73 volatile uncorrectable ECC errors** (GPUs 1–3: 0) and compute mode "Default". NVIDIA's A100 memory-error guide says recovery needs a GPU reset or reboot, which is an admin action. Resubmit with `--exclude=cs002` and report the GPU to HPC support. |
+| 93355 (2026-10-21) | `cs003`, GPU 1 (bus `00000000:65:00.0`) | **Passed** (`--exclude=cs002`). The preflight found 0 uncorrectable ECC errors, no pending row remaps, recovery action "None", and 39.1 of 39.5 GiB free. All 10 requests returned `200 OK`: `/v1/models` plus 9 chat completions. Another user's job held 7 GB on this node's GPU 0, which confirms GPU nodes are shared. |
+
+The server log ends each run with an `EngineDeadError` at shutdown. That is expected: our trap stops the server, vLLM's default shutdown (`mode=abort timeout=0s`) force-kills its engine process, and the API server logs this as it exits, ending in "Application shutdown complete".
+
+## Measurements
+
+**R5** (job 93355, one A100-PCIE-40GB, Qwen2.5-Coder-7B-Instruct bf16, `--max-model-len 16384 --gpu-memory-utilization 0.90`):
+
+| | |
+|---|---|
+| Start to healthy | 115 s (engine init 33 s, of which compilation 14.8 s; the rest is container start-up and loading weights from `/data`) |
+| GPU memory in use | 35,829 MiB of 40,960 |
+| KV cache | 346,928 tokens: 21.2 requests at 16,384 tokens each, or about 42 at 8K |
+| One request via OpenEvolve's `LLMEnsemble` | 0.27 s, 14 completion tokens |
+| 8 concurrent requests | 112 completion tokens in 0.20 s. Replies were short, so this shows concurrency works; it doesn't measure throughput |
+
+**R6:** to be filled in: seconds per OpenEvolve iteration with real prompts.
