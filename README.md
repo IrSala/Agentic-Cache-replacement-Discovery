@@ -2,9 +2,14 @@
 
 A reproducible OpenEvolve + ChampSim environment for SJSU CoE HPC. It is the foundation for evolving ChampSim cache-replacement policies with OpenEvolve, staged across GPU (generation) and CPU (evaluation) Slurm jobs.
 
-**Status:** Phase 1 is in progress. The environment is portable across the two clusters below, and OpenEvolve is being brought up one step at a time. The experiment contract is recorded in [docs/experiment-contract.md](docs/experiment-contract.md) and is not implemented yet.
+**Status:** Phase 1 is complete; see [docs/status.md](docs/status.md) for what works, the evidence and what's next.
+- A fresh clone builds on coe-hpc1 with `make setup` and runs on COE-HPC3 with no modules.
+- One GPU job serves a pinned 7B model with vLLM next to OpenEvolve, which evolves a ChampSim LLC replacement policy.
+- Candidates are compiled but not yet simulated. That's the next phase, following [docs/experiment-contract.md](docs/experiment-contract.md).
 
 ## Two clusters, one workflow
+
+New to the SJSU HPC? Start with [docs/sjsu-hpc-workflow.md](docs/sjsu-hpc-workflow.md): what an HPC is, how SJSU's is configured, and how to develop on it.
 
 SJSU CoE HPC is two clusters that share storage:
 
@@ -66,7 +71,7 @@ cd AFAR_HPC && make setup
 5. build `build/baseline/champsim`
 6. run `make check`
 
-It needs no Slurm allocation; builds run on the login node with `-j2`. In testing it took a few minutes with vcpkg's binary cache (`~/.cache/vcpkg`) already populated, and it takes longer the first time an account compiles the vcpkg libraries.
+It needs no Slurm allocation; builds run on the login node with `-j2`. A fresh clone took 392 s with pip's and vcpkg's caches turned off, as for a new account (2026-10-21), and less with vcpkg's binary cache (`~/.cache/vcpkg`) populated.
 
 **On g17**, confirm that HPC3 sees a working environment:
 
@@ -92,6 +97,46 @@ make smoke TRACE=/path/to/602.gcc_s-1850B.champsimtrace.xz
 
 Anything longer than `make smoke` belongs in a Slurm job, not on a login node.
 
+### LLM assets (once per group)
+
+The model and the vLLM container (about 21 GB) live in `$AFAR_ASSETS`, not in the clone. Fetch them on coe-hpc1:
+
+```bash
+make llm-fetch
+```
+
+Then pack the container on HPC3, from g17:
+
+```bash
+sbatch slurm/build_sif.sbatch
+```
+
+- `make llm-fetch` skips whatever is already there.
+- If a group member already has these files, point `AFAR_ASSETS` at their copy and skip both steps (see Environment rules).
+- `docs/llm-serving.md` explains the two-step container build.
+
+### GPU jobs (from g17)
+
+Check each request with `--test-only` first. Exclude `cs002` until its faulty GPU 0 is repaired.
+
+```bash
+sbatch --test-only --exclude=cs002 slurm/openevolve_champsim_compile.sbatch
+```
+
+```bash
+sbatch --exclude=cs002 slurm/openevolve_champsim_compile.sbatch
+```
+
+| Job script | What it runs | Output |
+|---|---|---|
+| `slurm/llm_ping.sbatch` | the vLLM server, checked through OpenEvolve's client | `logs/llm-ping-<id>.out` |
+| `slurm/openevolve_toy.sbatch` | OpenEvolve on its toy example | `runs/toy-<id>/` |
+| `slurm/openevolve_champsim_compile.sbatch` | OpenEvolve on the ChampSim policy, compile-only | `runs/champsim-compile-<id>/` |
+
+- **Resume** from a checkpoint with `--export=ALL,CHECKPOINT=runs/<run>/checkpoints/checkpoint_N,ITERATIONS=10`.
+- **Summarize** a run with `make oe-summary RUN=runs/<run>`.
+- **Test without a GPU:** each script's header shows how to run it on coe-hpc1 against a stand-in server (`AFAR_LLM_FAKE=1`).
+
 ## Make targets (coe-hpc1)
 
 | target | does |
@@ -107,6 +152,9 @@ Anything longer than `make smoke` belongs in a Slurm job, not on a login node.
 | `smoke TRACE=…` | 10K warmup + 10K simulated instructions, JSON output parsed |
 | `oe-check-config` | load `configs/openevolve/*.yaml` with OpenEvolve's loader; fail on unknown keys |
 | `oe-toy-manual` | run OpenEvolve's toy example with no LLM (`llm.manual_mode`). Each prompt appears as `$(OUT)/manual_tasks_queue/<id>.json`; answer it by writing `<id>.answer.json` containing `{"answer": "<SEARCH/REPLACE diff>"}`. Options: `OUT=`, `CHECKPOINT=<dir>` to resume, `ITERATIONS=` (counted from the checkpoint) |
+| `oe-summary RUN=…` | one row per iteration of an OpenEvolve run: outcome or evaluator status, score, LLM and evaluation seconds, tokens |
+| `oe-compile-selftest` | check the compile-only evaluator on variants of the seed, covering every status and the timeout kill (after `make champsim`) |
+| `llm-fetch` | download the pinned model and unpack the vLLM container into `$AFAR_ASSETS` (`LLM_PARTS=sandbox` or `model`; needs internet) |
 | `env-record` | rewrite `env/modules.lock.txt` and `env/versions.txt` |
 | `lock` | re-resolve `env/*-requirements.in` into the `.txt` locks (needs internet) |
 | `clean` / `distclean` | remove build outputs / also `.python/`, the venvs and `vcpkg_installed/` |
@@ -129,11 +177,26 @@ env/
   lock.sh, record-versions.sh
   modules.lock.txt, versions.txt   recorded evidence (generated by `make env-record`)
 slurm/                          batch jobs (submit from the repo root on g17)
+  check.sbatch, discover_gpu.sbatch   environment checks on a CPU node / an A100 node
+  build_sif.sbatch              pack the vLLM container into a .sif on a cpuqs node
+  llm_serve.sh                  sourced by GPU jobs: start, health-check and stop the vLLM sidecar
+  llm_ping.sbatch               serve the model and check it through OpenEvolve's client
+  openevolve_toy.sbatch         OpenEvolve on its toy example (R6)
+  openevolve_champsim_compile.sbatch   OpenEvolve on the ChampSim policy, compile-only (R7)
 configs/champsim/baseline.json  ChampSim configuration for baseline builds
-configs/openevolve/             OpenEvolve configs
+configs/llm/serve.env           pinned vLLM image and model (names, digests, revisions)
+configs/openevolve/             OpenEvolve configs: toy.yaml, toy-manual.yaml, champsim-compile.yaml
+seeds/evolved_repl.h            the seed candidate: a header-only port of ChampSim's LRU
+evaluator/compile_check.py      OpenEvolve evaluator for candidates (compile-only stub)
+scripts/                        llm_fetch.sh, llm_ping.py, fake_llm_server.py, oe_check_config.py, oe_run_summary.py
 examples/function_minimization/ OpenEvolve's own example (v0.4.0), used to test OpenEvolve itself
+docs/status.md                  what works, the evidence, open issues and next steps
+docs/sjsu-hpc-workflow.md       how to develop on SJSU HPC (for new users and coding agents)
+docs/llm-serving.md             LLM serving on HPC3: GPU facts, pinned assets, R5–R6 results
+docs/champsim-evaluator.md      how candidates are checked and compiled, and R7 results
 docs/experiment-contract.md     candidate format, manifest, result schema, fitness, failure policy (v0)
 external/ChampSim/              ChampSim submodule
+runs/                           OpenEvolve output, one directory per job (ignored by git)
 logs/                           Slurm job logs (contents ignored by git)
 ```
 
@@ -142,6 +205,10 @@ logs/                           Slurm job logs (contents ignored by git)
 - **Venvs are disposable and tied to their location.** If you move the clone, run `make distclean setup`.
 - **pip installs wheels only** (`--only-binary=:all:`). Building on glibc 2.17 means pip picks wheels that run on both clusters; numpy resolves to 2.2.6.
 - **Large assets** (LLM containers, model weights) go to `$AFAR_ASSETS`, which defaults to `/data/cmpe295-bond/$USER/afar`. If you aren't in that group, set `AFAR_ASSETS` before sourcing `env/site.sh`.
+- **Sharing assets:** jobs only *read* `$AFAR_ASSETS`. Files there are readable by the whole group by default, so teammates can use one copy: export `AFAR_ASSETS=<that path>`, for example in `~/.bashrc`, before `make` and `sbatch`, and skip `make llm-fetch`.
+  - The pinned file names include their versions, so a mismatched copy fails at job start rather than silently.
+  - **Known gap:** `make check` currently requires `$AFAR_ASSETS` to be writable (`docs/status.md`, issue 7).
+- **Keep `/home` small:** pip caches downloads in `~/.cache/pip` by default. Set `PIP_CACHE_DIR` under `/data` if that grows.
 
 ## Changing a pin
 
@@ -175,7 +242,9 @@ Measured after `make setup` (see `env/versions.txt`):
 | `.python/` | 111 MB |
 | `.venv/controller` | 151 MB |
 | `.venv/evaluator` | 33 MB |
-| total | about 0.65 GB |
+| total for the environment | about 0.65 GB |
+| whole fresh clone, including git history and `build/` (2026-10-21) | 795 MB |
+| `$AFAR_ASSETS` on `/data`: model 14 GB + container 7.1 GB | about 21 GB, plus 21 GB of unpacked container while the `.sif` is built |
 
 `--clean-after-build` already removes vcpkg's source downloads and build trees.
 

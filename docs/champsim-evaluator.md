@@ -62,7 +62,7 @@ This follows OpenEvolve's own example for compiled code (`examples/rust_adaptive
 | coe-hpc1 (`make oe-compile-selftest`) | Spack gcc 12.2.0 | `$(BUILD_ENV)`; this is the compiler that built ChampSim |
 | HPC3 GPU node (job) | `/usr/bin/g++` 11.5.0 (Rocky 9) | The job sets `AFAR_CXX=/usr/bin/g++` and logs its version |
 
-The self-test passed under gcc 12.2.0 and gcc 11.3.0 on coe-hpc1; 11.3 is the closest available to the nodes' 11.5. A compile takes about 1.2 s. The system `g++` on coe-hpc1 is 4.8.5 and can't compile C++17, so local job tests pass `AFAR_CXX`. Which compiler builds real candidates on HPC3 is a Phase 3 decision.
+The self-test passed under gcc 12.2.0 and gcc 11.3.0 on coe-hpc1; 11.3 is the closest available to the nodes' 11.5. A compile takes about 1.2 s. coe-hpc1's default `g++` (7.3) fails on the seed, because its libstdc++ has no `<charconv>`, so local job tests pass `AFAR_CXX` set to the Spack g++ 12. Which compiler builds real candidates on HPC3 is a Phase 3 decision.
 
 ### R7 attempts
 
@@ -90,6 +90,8 @@ All score 1.0 here, because the stub only checks that a candidate compiles.
 | LLM per iteration | about 12.4 s (about 1,000 completion tokens) |
 | Compile check | 0.7 s on the node |
 | Largest prompt | 3,806 tokens (+ 4,096 `max_tokens` ≤ 16,384) |
+
+**Open before any campaign:** the seed's header comment ("…a header-only port of replacement/lru") invites edits outside the block. All 5 rejections in 93495 were the model renaming it. Make it policy-neutral (`docs/status.md`, issue 1).
 
 **Change after 93458:** `<random>` is now in the seed's fixed includes and in the system message's header list, since 2 of 9 rewrites added it themselves.
 - **Why now:** the seed's fixed text is what every candidate is compared against, so it has to settle before any campaign.

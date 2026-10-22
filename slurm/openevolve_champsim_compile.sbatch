@@ -20,7 +20,7 @@
 # logs/vllm-<jobid>.log (server), runs/champsim-compile-<jobid>/logs/
 # (OpenEvolve, DEBUG level so every LLM reply is kept).
 #
-# Test without a GPU or Slurm on coe-hpc1 (system g++ there is too old for C++17):
+# Test without a GPU or Slurm on coe-hpc1 (its default g++ 7.3 lacks <charconv>):
 #     AFAR_CXX=<path to Spack g++ 12> SLURM_JOB_ID=12345 SLURM_SUBMIT_DIR=$PWD AFAR_LLM_FAKE=1 \
 #         bash slurm/openevolve_champsim_compile.sbatch
 #
