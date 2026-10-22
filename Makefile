@@ -48,7 +48,7 @@ PIP_FLAGS := --quiet --disable-pip-version-check --only-binary=:all:
 CHAMPSIM_LDFLAGS := -static-libstdc++ -static-libgcc
 
 .PHONY: help setup submodules python venvs vcpkg champsim check check-runtime smoke \
-        env-record lock clean distclean oe-check-config oe-toy-manual oe-summary llm-fetch
+        env-record lock clean distclean oe-check-config oe-toy-manual oe-summary oe-compile-selftest llm-fetch
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -116,6 +116,9 @@ oe-toy-manual: venvs ## Toy OpenEvolve run with no LLM (OUT=, CHECKPOINT=, ITERA
 
 oe-summary: venvs ## Summarize an OpenEvolve run, one row per iteration (RUN=runs/toy-<jobid>)
 	$(VENV_DIR)/controller/bin/python scripts/oe_run_summary.py $(RUN)
+
+oe-compile-selftest: venvs ## Check the R7 compile evaluator on variants of the seed (after make champsim)
+	$(BUILD_ENV) $(VENV_DIR)/controller/bin/python evaluator/compile_check.py --selftest
 
 llm-fetch: venvs ## Download the pinned model and unpack the vLLM sandbox into AFAR_ASSETS (LLM_PARTS=; needs internet)
 	$(BUILD_ENV) scripts/llm_fetch.sh $(LLM_PARTS)

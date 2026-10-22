@@ -1,0 +1,92 @@
+# R7: evolve the ChampSim LLC replacement policy (seeds/evolved_repl.h) with the
+# compile-only evaluator stub (evaluator/compile_check.py). No simulation yet,
+# so every candidate that compiles scores 1.0; the run tests the plumbing and
+# whether the model writes ChampSim-API C++ that compiles.
+#
+# LLM, seed and checkpoint settings as in toy.yaml (see its comments and
+# docs/llm-serving.md, R6). Jobs pass --api-base with the port the server bound.
+max_iterations: 10
+checkpoint_interval: 1   # OpenEvolve 0.4.0 skips an interval checkpoint if that iteration fails, and saves none on SIGTERM
+random_seed: null        # a top-level seed becomes one fixed LLM seed on every request (R6, job 93362)
+language: cpp            # used for the prompt's code fences and for parsing the reply
+
+llm:
+  primary_model: "afar-llm"                # name the local server exposes (configs/llm/serve.env)
+  api_base: "http://127.0.0.1:8000/v1"     # default only; jobs override with --api-base
+  api_key: "${AFAR_LLM_API_KEY}"           # random per job, exported by slurm/llm_serve.sh
+  temperature: 0.7
+  max_tokens: 4096
+  timeout: 300
+
+prompt:
+  # Fewer programs in each prompt than the defaults (3 and 2): prompt plus
+  # max_tokens must fit the server's 16,384-token context.
+  num_top_programs: 2
+  num_diverse_programs: 1
+  include_artifacts: true      # a parent's compiler errors appear in its child's prompt
+  max_artifact_bytes: 8192
+  system_message: |
+    You are an expert in CPU cache replacement policies and modern C++. You are improving the
+    last-level cache (LLC) replacement policy of the ChampSim simulator, at commit 410cee6.
+
+    The program is one C++17 header, evolved_repl.h, defining
+    `class evolved_repl : public champsim::modules::replacement`.
+    ChampSim creates one object per cache with the constructor `evolved_repl(CACHE* cache)`;
+    `cache->NUM_SET` and `cache->NUM_WAY` give the geometry. ChampSim finds the member functions
+    below by their exact signatures. A function with any other signature is silently never
+    called, so keep these signatures exactly:
+
+      long find_victim(uint32_t triggering_cpu, uint64_t instr_id, long set,
+                       const champsim::cache_block* current_set, champsim::address ip,
+                       champsim::address full_addr, access_type type);
+        Return the way, 0 to NUM_WAY-1, to evict from `set`. current_set points to the set's
+        NUM_WAY blocks (fields: valid, prefetch, dirty, address).
+
+      void update_replacement_state(uint32_t triggering_cpu, long set, long way,
+                                    champsim::address full_addr, champsim::address ip,
+                                    champsim::address victim_addr, access_type type, uint8_t hit);
+        Called on hits and misses.
+
+      void replacement_cache_fill(uint32_t triggering_cpu, long set, long way,
+                                  champsim::address full_addr, champsim::address ip,
+                                  champsim::address victim_addr, access_type type);
+        Called when a block is filled into `way`.
+
+    access_type is an enum class: LOAD, RFO, PREFETCH, WRITE, TRANSLATION. Get integers from
+    addresses with full_addr.to<uint64_t>() and ip.to<uint64_t>().
+
+    Rules:
+    - Define every member function inside the class body (header-only).
+    - Only the code between the `// EVOLVE-BLOCK-START` and `// EVOLVE-BLOCK-END` lines may
+      change. Keep both marker lines, and every line outside them, exactly as they are.
+    - You cannot add #include lines. Available headers: <algorithm> <array> <cassert> <cmath>
+      <cstdint> <deque> <limits> <map> <numeric> <unordered_map> <vector>, plus ChampSim's
+      cache.h and modules.h.
+    - Do not use older or newer ChampSim APIs: no free functions such as CACHE::find_victim,
+      no register_module, no virtual or override.
+    - Reply with the complete file in one ```cpp code block.
+
+    Propose better replacement policies, for example ideas from SRRIP, DRRIP, SHiP or Hawkeye,
+    that compile cleanly with -Wall -Wextra.
+
+database:
+  population_size: 50
+  archive_size: 20
+  num_islands: 3
+  elite_selection_ratio: 0.2
+  exploitation_ratio: 0.7
+  similarity_threshold: 0.99
+  random_seed: 42
+
+evaluator:
+  timeout: 120                 # above the evaluator's own 60 s compile limit, so its kill comes first
+  max_retries: 1               # retries only when evaluate() raises, i.e. infra_error
+  cascade_evaluation: false
+  parallel_evaluations: 1
+
+# Full rewrites: the 7B model ignores the SEARCH/REPLACE format (R6, job 93362).
+# enforce_evolve_blocks has no effect in OpenEvolve 0.4.0 (never reaches the
+# workers); the evaluator rejects edits outside the block itself.
+diff_based_evolution: false
+enforce_evolve_blocks: true
+max_code_length: 40000         # above the evaluator's 32 KB limit, so it reports oversize candidates itself

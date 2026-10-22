@@ -61,6 +61,19 @@ def best_score(run):
     return None, None
 
 
+def contract_statuses(run):
+    """Program id -> the evaluator's `status` artifact (docs/experiment-contract.md), from the newest checkpoint."""
+    checkpoints = sorted((run / "checkpoints").glob("checkpoint_*"), key=lambda p: int(p.name.split("_")[-1]))
+    statuses = {}
+    if checkpoints:
+        for path in (checkpoints[-1] / "programs").glob("*.json"):
+            program = json.loads(path.read_text())
+            artifacts = json.loads(program.get("artifacts_json") or "{}")
+            if "status" in artifacts:
+                statuses[program["id"]] = artifacts["status"]
+    return statuses
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("run", type=Path, help="OpenEvolve output directory (--output)")
@@ -102,6 +115,13 @@ def main():
         sys.exit(f"oe_run_summary: no iteration lines in {', '.join(map(str, logs))} "
                  "(not an OpenEvolve 0.4.0 log?)")
 
+    # An evaluator that follows the contract reports a status; prefer it to the metrics.
+    statuses = contract_statuses(args.run)
+    for row in rows:
+        if row[5] in statuses:
+            row[1] = f"applied; {statuses[row[5]]}"
+    success = ("applied; scored", "applied; completed")
+
     print(f"run: {args.run}  logs: {', '.join(p.name for p in logs)}")
     # secs = the worker's whole iteration; eval = the evaluator's part of it; the
     # rest is almost all waiting for the LLM.
@@ -112,10 +132,10 @@ def main():
               f"{fmt(eval_secs.get(pid), '.1f'):>6}  {tokens or '':>6}  {outcome}")
 
     applied = [r for r in rows if r[1].startswith("applied")]
-    scored = [r for r in applied if r[1] == "applied; scored"]
+    scored = [r for r in applied if r[1] in success]
     print(f"\niterations: {len(rows)}  applied: {len(applied)} (scored: {len(scored)}, "
           f"evaluation failed: {len(applied) - len(scored)})  rejected: {len(rows) - len(applied)}")
-    for message, count in Counter(r[1] for r in rows if r[1] != "applied; scored").most_common():
+    for message, count in Counter(r[1] for r in rows if r[1] not in success).most_common():
         print(f"  {count:>3} x {message[:100]}")
     if start and last and rows:
         print(f"wall seconds per iteration: {(last - start).total_seconds() / len(rows):.1f}")
