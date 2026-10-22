@@ -90,4 +90,7 @@ All score 1.0 here, because the stub only checks that a candidate compiles.
 | Compile check | 0.7 s on the node |
 | Largest prompt | 3,806 tokens (+ 4,096 `max_tokens` ≤ 16,384) |
 
-**Possible next change:** add `<random>` to the seed's fixed includes, since 2 of 9 rewrites wanted it. The change has to happen before any campaign, because the seed's fixed text is what candidates are compared against.
+**Change after 93458:** `<random>` is now in the seed's fixed includes and in the system message's header list, since 2 of 9 rewrites added it themselves.
+- **Why now:** the seed's fixed text is what every candidate is compared against, so it has to settle before any campaign.
+- **Checked:** the self-test passes under gcc 12.2 and 11.3. A fake job replaying a rewrite that uses `std::mt19937_64` gave `completed` on all 3 iterations.
+- **Tie behaviour:** with every candidate tied at 1.0, OpenEvolve keeps the seed as the saved best, because a tie never replaces the current best.

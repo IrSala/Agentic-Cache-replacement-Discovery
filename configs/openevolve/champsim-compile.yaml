@@ -60,7 +60,7 @@ prompt:
     - Only the code between the `// EVOLVE-BLOCK-START` and `// EVOLVE-BLOCK-END` lines may
       change. Keep both marker lines, and every line outside them, exactly as they are.
     - You cannot add #include lines. Available headers: <algorithm> <array> <cassert> <cmath>
-      <cstdint> <deque> <limits> <map> <numeric> <unordered_map> <vector>, plus ChampSim's
+      <cstdint> <deque> <limits> <map> <numeric> <random> <unordered_map> <vector>, plus ChampSim's
       cache.h and modules.h.
     - Do not use older or newer ChampSim APIs: no free functions such as CACHE::find_victim,
       no register_module, no virtual or override.
