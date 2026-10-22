@@ -98,6 +98,12 @@ The server log ends each run with an `EngineDeadError` at shutdown. That is expe
 | Seconds per iteration | 10.3 wall clock, nearly all LLM time (no candidate was evaluated) |
 | KV cache in use | 0.4% |
 
+**Host memory:** the GPU jobs request `--mem=24G`.
+- **Measured:** `sacct` MaxRSS was 3.1 GB for llm-ping (93355), 4.1–4.2 GB for the toy runs (93369, 93386) and 4.2 GB for R7 (93458).
+- **Why it's low:** the weights and KV cache live on the GPU. The model files read from `/data` sit in the page cache, which the kernel can reclaim and MaxRSS doesn't count.
+- **Why it matters:** the original 64G request kept job 93491 waiting for hours (`Resources`). The A100 nodes with a free GPU had only 27–59 GB of unallocated memory left, while CPUs and GPUs were free. With 24G, job 93495 started at once on `cs001`.
+- **Margin:** 24G is about 6× the peak, because Slurm samples memory only every 30 s or so.
+
 ## OpenEvolve with the real model (R6)
 
 `slurm/openevolve_toy.sbatch` runs `openevolve-run` on the function_minimization toy against the sidecar and writes `runs/toy-<jobid>`:

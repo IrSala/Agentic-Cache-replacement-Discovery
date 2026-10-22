@@ -28,7 +28,7 @@
 #SBATCH --partition=gpuqs
 #SBATCH --gres=gpu:a100:1
 #SBATCH --cpus-per-task=8
-#SBATCH --mem=64G
+#SBATCH --mem=24G                 # measured peak ~4.2 GB (sacct MaxRSS); 64G kept jobs waiting
 #SBATCH --time=01:00:00
 #SBATCH --signal=B:TERM@60              # lets the traps stop OpenEvolve and the server before the time limit
 #SBATCH --output=logs/%x-%j.out
