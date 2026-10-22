@@ -87,4 +87,51 @@ The server log ends each run with an `EngineDeadError` at shutdown. That is expe
 | One request via OpenEvolve's `LLMEnsemble` | 0.27 s, 14 completion tokens |
 | 8 concurrent requests | 112 completion tokens in 0.20 s. Replies were short, so this shows concurrency works; it doesn't measure throughput |
 
-**R6:** to be filled in: seconds per OpenEvolve iteration with real prompts.
+**R6** (job 93362, same server settings, OpenEvolve's real prompts, one request at a time):
+
+| | |
+|---|---|
+| Start to healthy | 75 s |
+| Prompt | 1,352 tokens |
+| Reply | about 779 completion tokens: the whole program plus an explanation |
+| Generation speed | 79.5 tokens/s (vLLM's own log) |
+| Seconds per iteration | 10.3 wall clock, nearly all LLM time (no candidate was evaluated) |
+| KV cache in use | 0.4% |
+
+## OpenEvolve with the real model (R6)
+
+`slurm/openevolve_toy.sbatch` runs `openevolve-run` on the function_minimization toy against the sidecar and writes `runs/toy-<jobid>`:
+- It logs at DEBUG, so every raw reply is kept, including replies whose edits fail to apply.
+- It forwards the time-limit SIGTERM to OpenEvolve, which then saves `best/`.
+- It checks that the API key appears in no log.
+- It ends with `scripts/oe_run_summary.py` (or `make oe-summary RUN=<run dir>`).
+
+With `AFAR_LLM_FAKE_REPLY=<file>`, the fake server answers with a recorded reply, so a real model's output can be replayed through OpenEvolve on coe-hpc1.
+
+OpenEvolve 0.4.0 behaviour behind `configs/openevolve/toy.yaml`:
+- **Checkpoints:** interval checkpoints are written only after a successful iteration, and none on SIGTERM. So the toy checkpoints every iteration.
+- **Seed:** a top-level `random_seed` (default 42) becomes one fixed seed on every LLM request. vLLM honours it, so an unchanged prompt gets an unchanged reply. The toy sets `random_seed: null` and seeds only the database's sampling.
+- **Edit format:** the 7B model doesn't follow the SEARCH/REPLACE diff format (job 93362, below). The toy uses full rewrites (`diff_based_evolution: false`).
+- **EVOLVE-BLOCK enforcement doesn't work in 0.4.0.** `enforce_evolve_blocks: true` is accepted but never reaches the workers. `_serialize_config` (`process_parallel.py:505-525`) builds their config from a fixed key list that leaves it out, and the workers are where it's applied (`process_parallel.py:330`).
+  - Upstream `main` now forwards every `Config` field, but no release has the fix yet (0.4.0 is the latest on PyPI).
+  - In jobs 93369 and 93386, 10 of the 18 evolved programs lost their markers. All 10 changed the fixed `run_search` entry point that the evaluator calls, including the best program (iteration 2). None changed the objective function. Once a parent has no markers, OpenEvolve can't enforce anything on its children.
+  - Until a release has the fix, the evaluator must reject edits outside the EVOLVE-BLOCK itself. For R7 that means the `invalid_candidate` status in `docs/experiment-contract.md`.
+
+### R6 attempts
+
+| Job | Node / GPU | Result |
+|---|---|---|
+| 93362 (2026-10-21) | `cs003`, GPU 0 (bus `00000000:17:00.0`) | **Server and OpenEvolve worked together; the edits did not apply.**<br>**What worked:** the preflight was clean, and the CLI used the job's port and `afar-llm`. All 10 requests returned `200`, there was no key in any log, `checkpoint_10` and `best/` were saved, and the job exited 0.<br>**What failed:** 0 of 10 iterations applied ("No valid diffs found in response"). Every reply was a full rewrite in a fenced code block, despite the prompt's diff instructions and example. Replies 2–10 were byte-identical: nothing was added, so the prompt never changed, and every request carried the same seed (191216760).<br>**Offline check:** OpenEvolve's full-rewrite parser accepted both distinct replies, and the toy evaluator scored them 1.34 and 1.47. For comparison, the initial program scored 1.45 locally and 1.21 in the job, because the evaluator is unseeded. Replaying reply 2 locally in full-rewrite mode applied and scored it.<br>**Fix:** full rewrites with EVOLVE-BLOCK enforcement, and no LLM seed. |
+| 93369 (2026-10-21) | `cs003`, GPU 0 | **Passed** (full rewrites, no LLM seed).<br>**Edits:** 9 of 10 replies applied; the other returned its parent unchanged. All 10 replies differed, and no request carried a seed. Parents included evolved programs from iteration 5 on.<br>**Scores:** the best was 1.4887 (initial program 1.2596 in this run). Of the 9 applied candidates, only 2 scored. One imported scipy, which isn't in the venv. Six timed out: one at the evaluator's own 5 s limit, and five at OpenEvolve's 60 s stage-1 limit.<br>**Plumbing:** checkpoints were saved after each success plus `checkpoint_10`, all 10 requests returned `200`, there was no key in any log, and the job exited 0. |
+| 93386 (2026-10-21) | `cs003`, GPU 0 | **Resume passed** (`--export=ALL,CHECKPOINT=runs/toy-93369/checkpoints/checkpoint_10,ITERATIONS=10`).<br>**Resume:** the log shows "Checkpoint loaded successfully (iteration 10)", "Resuming from checkpoint at iteration 11", and "Skipping initial program addition (… 10 existing programs)". Iterations 11–20 ran and `checkpoint_20` has `last_iteration` 20 and 19 programs. The best program (1.4887, found at iteration 2) carried over.<br>**Edits:** 9 of 10 applied, building on both loaded and new programs, but none scored. Eight timed out at 60 s; for example, one cooled `while temp > 1e-10` with an inner loop at every temperature, millions of numpy calls in plain Python. One imported scipy.<br>**Plumbing:** all 10 requests returned `200`, there was no key in any log, and the job exited 0. |
+
+**Why candidates hit the 60 s limit:** the toy evaluator (upstream's) runs each candidate in a thread under `with ThreadPoolExecutor(...)`, with a 5 s `future.result` timeout. Leaving that block waits for the thread, so a slow candidate is never stopped, and OpenEvolve's stage-1 limit ends it instead. This is a property of the toy, not of the serving setup. R7's evaluator must run candidates as subprocesses and kill them on timeout, as the experiment contract's `timeout` status assumes.
+
+**R6 timings** (from `scripts/oe_run_summary.py`):
+
+| | Job 93369 (iterations 1–10) | Job 93386 (11–20) |
+|---|---|---|
+| Wall seconds per iteration | 43.8 | 64.7 |
+| LLM per iteration | about 12.3 s (mean 966 completion tokens at about 80 tokens/s) | about 16.8 s (mean 1,264 tokens) |
+| Evaluation per applied candidate | mean 34.9 s. Scored candidates took 0.5–7.4 s; the rest is 60 s timeouts. | mean 53.4 s (8 of 9 timed out) |
+| Largest prompt | 4,243 tokens | 7,204 tokens (+ 4,096 `max_tokens` ≤ 16,384) |

@@ -27,7 +27,7 @@ source env/site.sh
 source configs/llm/serve.env
 source slurm/llm_serve.sh
 
-echo "job=${SLURM_JOB_ID} node=$(hostname) date=$(date -Is) commit=$(git rev-parse --short HEAD 2>/dev/null)"
+echo "job=${SLURM_JOB_ID} node=$(hostname) date=$(date -Is) commit=$(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet HEAD 2>/dev/null || echo -dirty)"
 if [[ "${AFAR_LLM_FAKE:-0}" != 1 ]]; then
     echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-unset}"
     nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader

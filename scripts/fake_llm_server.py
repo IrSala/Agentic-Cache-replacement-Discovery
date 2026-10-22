@@ -23,7 +23,11 @@ def main():
                         help="simulate a server that dies during start-up")
     parser.add_argument("--startup-delay", type=float, default=0,
                         help="seconds to wait before serving, like a model still loading")
+    parser.add_argument("--reply-file",
+                        help="answer every chat completion with this file's text, e.g. a reply "
+                             "recorded from a real run (default: a short canned reply)")
     args = parser.parse_args()
+    reply = open(args.reply_file).read() if args.reply_file else REPLY
     if args.exit_immediately:
         print("fake server: simulated start-up failure", flush=True)
         raise SystemExit(1)
@@ -66,7 +70,7 @@ def main():
                 "id": "chatcmpl-fake", "object": "chat.completion", "created": int(time.time()),
                 "model": args.served_model_name,
                 "choices": [{"index": 0, "finish_reason": "stop",
-                             "message": {"role": "assistant", "content": REPLY}}],
+                             "message": {"role": "assistant", "content": reply}}],
                 "usage": {"prompt_tokens": 20, "completion_tokens": 12, "total_tokens": 32},
             })
 

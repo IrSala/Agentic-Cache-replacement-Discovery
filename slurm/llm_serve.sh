@@ -16,7 +16,9 @@
 #
 # AFAR_LLM_FAKE=1 starts scripts/fake_llm_server.py instead of vLLM, so a job
 # script can be tested on coe-hpc1 without a GPU. AFAR_LLM_FAKE_FAIL=1 makes
-# that stand-in die at start-up; AFAR_LLM_FAKE_DELAY=<s> makes it load slowly.
+# that stand-in die at start-up; AFAR_LLM_FAKE_DELAY=<s> makes it load slowly;
+# AFAR_LLM_FAKE_REPLY=<file> makes it answer with that file's text, e.g. a
+# reply recorded from a real run.
 
 _llm_py=".venv/controller/bin/python"
 
@@ -82,6 +84,7 @@ llm_start() {
         VLLM_API_KEY="$AFAR_LLM_API_KEY" "$_llm_py" scripts/fake_llm_server.py \
             --port "$AFAR_LLM_PORT" --served-model-name "$SERVED_MODEL_NAME" \
             ${AFAR_LLM_FAKE_FAIL:+--exit-immediately} --startup-delay "${AFAR_LLM_FAKE_DELAY:-0}" \
+            ${AFAR_LLM_FAKE_REPLY:+--reply-file "$AFAR_LLM_FAKE_REPLY"} \
             > "$AFAR_LLM_LOG" 2>&1 &
     else
         local sif="${AFAR_ASSETS}/containers/${VLLM_SIF}"
