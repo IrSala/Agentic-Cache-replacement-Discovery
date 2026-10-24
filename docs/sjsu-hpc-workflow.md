@@ -189,6 +189,15 @@ a=$(sbatch --parsable step1.sbatch); sbatch --dependency=afterok:$a step2.sbatch
 env -i HOME="$HOME" USER="$USER" PATH=/usr/bin:/bin bash script.sh
 ```
 
+**HPC3 Slurm settings that matter for automation** *(measured 2026-10-23)*:
+- Slurm 23.11.10.
+- **Jobs can submit jobs:** compute nodes have `sbatch`, `squeue` and `sacct`, so a job can submit its own successor.
+- **`scrontab` (Slurm's cron) is disabled.** For periodic checks, use a short job that resubmits itself with `--begin=now+1hour`.
+- **Failed dependencies:** to react to a failed job, submit a handler with `--dependency=afternotok:<id>`. `afterok` on an array fires only if *every* task succeeds; otherwise the dependent job waits forever (`DependencyNeverSatisfied`) unless it was submitted with `--kill-on-invalid-dep=yes`.
+- **Requeueing:** `JobRequeue=1`, so jobs are requeued after a node failure. A job script must be safe to run twice.
+- **Limits:** `MaxArraySize` is 1001 (array indices 0–1000), and `MaxJobCount` is 10000 jobs cluster-wide.
+- **Mail:** `MailProg=/bin/mail`, so `--mail-type=FAIL --mail-user=<you>` can notify you (delivery not yet tested).
+
 **Sizing a request and diagnosing a wait:**
 - `sbatch --test-only <script>` reports whether the request fits, and the expected start time and node, without submitting.
 - `squeue -j <id> -o "%i %T %r %S"` shows a pending job's reason (`Resources`, `Priority`, `QOSMaxNodePerUserLimit`, …) and Slurm's estimated start.

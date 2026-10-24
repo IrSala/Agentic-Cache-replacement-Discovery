@@ -2,7 +2,7 @@
 
 A reproducible OpenEvolve + ChampSim environment for SJSU CoE HPC. It is the foundation for evolving ChampSim cache-replacement policies with OpenEvolve, staged across GPU (generation) and CPU (evaluation) Slurm jobs.
 
-**Status:** Phase 1 is complete; see [docs/status.md](docs/status.md) for what works, the evidence and what's next.
+**Status:** Phase 1 is complete; see [docs/status.md](docs/status.md) for what works and the evidence, and [docs/roadmap.md](docs/roadmap.md) for the plan to an autonomous, multi-node research system.
 - A fresh clone builds on coe-hpc1 with `make setup` and runs on COE-HPC3 with no modules.
 - One GPU job serves a pinned 7B model with vLLM next to OpenEvolve, which evolves a ChampSim LLC replacement policy.
 - Candidates are compiled but not yet simulated. That's the next phase, following [docs/experiment-contract.md](docs/experiment-contract.md).
@@ -191,6 +191,7 @@ evaluator/compile_check.py      OpenEvolve evaluator for candidates (compile-onl
 scripts/                        llm_fetch.sh, llm_ping.py, fake_llm_server.py, oe_check_config.py, oe_run_summary.py
 examples/function_minimization/ OpenEvolve's own example (v0.4.0), used to test OpenEvolve itself
 docs/status.md                  what works, the evidence, open issues and next steps
+docs/roadmap.md                 the plan to an autonomous, multi-node research system (M0–M7)
 docs/sjsu-hpc-workflow.md       how to develop on SJSU HPC (for new users and coding agents)
 docs/llm-serving.md             LLM serving on HPC3: GPU facts, pinned assets, R5–R6 results
 docs/champsim-evaluator.md      how candidates are checked and compiled, and R7 results

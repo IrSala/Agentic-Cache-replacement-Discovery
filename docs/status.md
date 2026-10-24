@@ -1,6 +1,6 @@
 # Project status
 
-As of 2026-10-22 (commit `735bc31`). What works, how it was verified, what was measured, and what's next. Update this page at the end of each phase.
+As of 2026-10-23. What works, how it was verified, what was measured, and what's next. Update this page at the end of each milestone. The plan going forward is in `docs/roadmap.md`.
 
 ## Summary
 
@@ -80,7 +80,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | 2 | The compile-only stub scores every compiling candidate 1.0 | No fitness signal; OpenEvolve keeps the seed as "best" on ties | Phase 3: real build plus ChampSim run | Next phase |
 | 3 | `-fsyntax-only` doesn't link | A member declared but never defined passes | Phase 3's real build | Next phase |
 | 4 | Compiler feedback rarely reaches the model | OpenEvolve shows artifacts only to a program's children, and failures score 0 | Accept, or a custom prompt template later | Known |
-| 5 | Which compiler builds candidates on HPC3? | coe-hpc1 built ChampSim and its vcpkg libraries with gcc 12.2; HPC3 nodes have only gcc 11.5 | Decide at the start of Phase 3: system gcc 11.5, a pinned compiler container, or another option | Open |
+| 5 | Which compiler builds candidates on HPC3? | coe-hpc1 built ChampSim and its vcpkg libraries with gcc 12.2; HPC3 nodes have only gcc 11.5 | **Decided 2026-10-23:** the nodes' system gcc 11.5, with no sandbox. M2 starts with a test build against the gcc-12 libraries; the fallback is rebuilding vcpkg offline on HPC3 | Decided; tested in M2 |
 | 6 | The only trace is a smoke trace with flat fitness | LRU, SRRIP, DRRIP and SHiP land within 0.2% IPC on it | Calibrate LLC-sensitive traces (contract §2) | Open |
 | 7 | `env/check.sh` requires `AFAR_ASSETS` to be writable | Teammates sharing a read-only copy fail `make check` | Check that the pinned files are readable; require write access only for `llm-fetch` | Open |
 | 8 | pip's cache isn't redirected | `~/.cache/pip` is 3 GB on the 99%-full `/home` (mostly older than this repo) | Set `PIP_CACHE_DIR` under `$AFAR_ASSETS`, or pass `--no-cache-dir` | Open |
@@ -89,11 +89,12 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 
 ## Next steps
 
-1. **Finish BUILD_PLAN phase 2:** run the baseline binary on the smoke trace in an HPC3 CPU job, and write the contract's result JSON (§3) plus `baselines/<experiment>/<trace>.json`.
-2. **Decide the candidate toolchain (issue 5)**, then build Phase 3's real evaluator:
-   - a per-candidate `config.sh --prefix <workspace> --replacement-dir …` build, plus `make`
-   - a run on the trace, and parsing of ChampSim's `--json` output
-   - the contract's statuses and fitness
-   - a preflight showing that the seed reproduces LRU's cycles exactly
-3. **Before any campaign:** fix the seed comment (issue 1), and calibrate a trace set where policies differ (issue 6).
-4. **Phase 4 with real fitness:** short ChampSim runs inside the GPU job, then BUILD_PLAN's staged GPU-generation and CPU-array design (phases 5–6).
+The plan to an autonomous, multi-node research system is in **`docs/roadmap.md`**: its architecture, research levers, failure handling and milestones M0–M7.
+
+| Milestone | State |
+|---|---|
+| **M0** HPC3 capability check | **Done (2026-10-23).** Jobs can submit jobs; `scrontab` is disabled, so the watchdog uses `afternotok` handlers plus a `--begin` heartbeat; `MaxArraySize` is 1001; `JobRequeue=1`; `/bin/mail` is available |
+| **M1** Baseline in Slurm, result schema, manifest v1, and issues 1, 7 and 8 | **Next.** Its detailed plan comes first |
+| M2 Real evaluator (resolves issues 2, 3 and 5) | Planned. Issue 5 is decided: build with the nodes' gcc 11.5 and no sandbox, after a toolchain test job |
+| M3 Trace calibration (issue 6) · M4 Single-job prototype with real fitness | Planned |
+| M5 Staged generations (issue 10) · M6 Long-run hardening · M7 Comparing levers | Planned |
