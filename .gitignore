@@ -1,0 +1,33 @@
+# Python virtual environments (recreate with `make venvs`)
+.venv/
+.python/
+__pycache__/
+*.pyc
+
+# Build outputs (recreate with `make champsim`)
+build/
+
+# Experiment outputs (later phases); logs/ exists so sbatch --output can write there
+campaigns/
+results/
+runs/
+logs/*
+!logs/.gitkeep
+
+# Traces are large; keep them outside the repo and reference them by path
+*.champsimtrace
+*.champsimtrace.xz
+*.champsimtrace.gz
+
+# Slurm output
+slurm-*.out
+slurm-*.err
+*.out
+*.err
+
+# Editor / OS / personal tool settings
+.claude/settings.local.json
+.vscode/
+.idea/
+*.swp
+.DS_Store

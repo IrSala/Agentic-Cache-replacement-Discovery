@@ -1,0 +1,10 @@
+# Portable CPython for both venvs (included by the Makefile; also valid shell).
+#
+# python-build-standalone builds need only glibc >= 2.17, so venvs built from
+# it on coe-hpc1 (CentOS 7) also run in COE-HPC3 jobs (Rocky 9). `make python`
+# downloads it into .python/ and verifies the sha256. Change all three together;
+# the venvs are rebuilt automatically.
+#   https://github.com/astral-sh/python-build-standalone/releases/tag/20260924
+PYTHON_VERSION=3.11.16
+PBS_RELEASE=20260924
+PBS_SHA256=49a52eb189878431a36efd137e7cd08f6429e59dc049b9cfb030bf706eb33fd4

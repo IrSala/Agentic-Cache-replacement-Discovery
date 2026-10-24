@@ -1,0 +1,3 @@
+[submodule "external/ChampSim"]
+	path = external/ChampSim
+	url = https://github.com/ChampSim/ChampSim.git

@@ -1,0 +1,75 @@
+#!/bin/bash
+# R7: OpenEvolve evolves the ChampSim LLC replacement policy (seeds/evolved_repl.h)
+# against the pinned model, served by vLLM as a sidecar on one A100
+# (slurm/llm_serve.sh). Candidates are checked by the compile-only evaluator
+# stub (evaluator/compile_check.py). Output goes to runs/champsim-compile-<jobid>.
+#
+# Submit from ~/AFAR_HPC on coe-hpc3 (g17), checking the request first:
+#     sbatch --test-only slurm/openevolve_champsim_compile.sbatch
+#     sbatch slurm/openevolve_champsim_compile.sbatch
+# Resume from another job's checkpoint for N more iterations:
+#     sbatch --export=ALL,CHECKPOINT=runs/champsim-compile-<jobid>/checkpoints/checkpoint_10,ITERATIONS=10 \
+#         slurm/openevolve_champsim_compile.sbatch
+# To avoid a node with a faulty GPU, add --exclude=<node>.
+#
+# The compiler is the node's system g++ unless AFAR_CXX names another. The
+# evaluator's selftest runs on the node before the server starts, so a
+# toolchain problem fails in seconds.
+#
+# Logs: logs/oe-cs-compile-<jobid>.out (this script and the summary),
+# logs/vllm-<jobid>.log (server), runs/champsim-compile-<jobid>/logs/
+# (OpenEvolve, DEBUG level so every LLM reply is kept).
+#
+# Test without a GPU or Slurm on coe-hpc1 (its default g++ 7.3 lacks <charconv>):
+#     AFAR_CXX=<path to Spack g++ 12> SLURM_JOB_ID=12345 SLURM_SUBMIT_DIR=$PWD AFAR_LLM_FAKE=1 \
+#         bash slurm/openevolve_champsim_compile.sbatch
+#
+#SBATCH --job-name=oe-cs-compile
+#SBATCH --partition=gpuqs
+#SBATCH --gres=gpu:a100:1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem=24G                 # measured peak ~4.2 GB (sacct MaxRSS); 64G kept jobs waiting
+#SBATCH --time=01:00:00
+#SBATCH --signal=B:TERM@60              # lets the traps stop OpenEvolve and the server before the time limit
+#SBATCH --output=logs/%x-%j.out
+
+set -euo pipefail
+cd "${SLURM_SUBMIT_DIR}"
+source env/site.sh
+source configs/llm/serve.env
+source slurm/llm_serve.sh
+
+export AFAR_CXX="${AFAR_CXX:-/usr/bin/g++}"
+run="runs/champsim-compile-${SLURM_JOB_ID}"
+echo "job=${SLURM_JOB_ID} node=$(hostname) date=$(date -Is) commit=$(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet HEAD 2>/dev/null || echo -dirty)"
+echo "run=${run} CHECKPOINT=${CHECKPOINT:-none} ITERATIONS=${ITERATIONS:-from config}"
+echo "compiler: AFAR_CXX=${AFAR_CXX} ($("$AFAR_CXX" --version | head -1))"
+
+# The evaluator on this node's compiler, before the GPU work starts.
+.venv/controller/bin/python evaluator/compile_check.py --selftest
+
+llm_gpu_preflight
+llm_start
+llm_wait_ready 900
+
+# In the background with wait, so a SIGTERM from --signal reaches the trap
+# promptly. --signal=B: signals only this shell, so the trap passes it on:
+# OpenEvolve then stops its workers and saves best/ before the server stops.
+.venv/controller/bin/openevolve-run \
+    seeds/evolved_repl.h evaluator/compile_check.py \
+    --config configs/openevolve/champsim-compile.yaml \
+    --api-base "$AFAR_LLM_API_BASE" --primary-model "$SERVED_MODEL_NAME" \
+    --output "$run" --log-level DEBUG \
+    ${ITERATIONS:+--iterations "$ITERATIONS"} ${CHECKPOINT:+--checkpoint "$CHECKPOINT"} &
+oe_pid=$!
+trap 'echo "job: received SIGTERM, stopping OpenEvolve"; kill -TERM "$oe_pid" 2>/dev/null || true; wait "$oe_pid" || true; exit 143' TERM
+wait "$oe_pid"
+
+# DEBUG logs hold every request, so check the key did not end up in them. The
+# key reaches grep through a pipe (printf is a builtin), never a command line.
+if grep -rqF -f <(printf '%s\n' "$AFAR_LLM_API_KEY") "$run/logs" "$AFAR_LLM_LOG"; then
+    echo "WARNING: the API key appears in ${run}/logs or ${AFAR_LLM_LOG}" >&2
+fi
+
+.venv/controller/bin/python scripts/oe_run_summary.py "$run"
+echo "done"
