@@ -11,6 +11,12 @@ cd "$(dirname "$0")/.."
 source env/site.sh
 source configs/llm/serve.env
 
+if ! { mkdir -p "$AFAR_ASSETS" && [[ -w "$AFAR_ASSETS" ]]; } 2>/dev/null; then
+    echo "llm_fetch: AFAR_ASSETS ($AFAR_ASSETS) is not writable." >&2
+    echo "  To use a teammate's copy, skip make llm-fetch; to download your own, set AFAR_ASSETS to a directory you own." >&2
+    exit 1
+fi
+
 containers="${AFAR_ASSETS}/containers"
 models="${AFAR_ASSETS}/models"
 mkdir -p "$containers" "$models" "$APPTAINER_CACHEDIR" "$APPTAINER_TMPDIR" "$HF_HOME"

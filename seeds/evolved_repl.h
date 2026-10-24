@@ -2,8 +2,7 @@
 #define REPLACEMENT_EVOLVED_REPL_H
 
 // LLC replacement policy for ChampSim (pinned commit 410cee6), evolved by
-// OpenEvolve. The seed is a header-only port of replacement/lru.
-// Only the code between the EVOLVE-BLOCK markers may change.
+// OpenEvolve. Only the code between the EVOLVE-BLOCK markers may change.
 
 #include <algorithm>
 #include <array>
@@ -24,6 +23,7 @@
 class evolved_repl : public champsim::modules::replacement
 {
   // EVOLVE-BLOCK-START
+  // Seed: a header-only port of ChampSim's replacement/lru.
   long NUM_WAY;
   std::vector<uint64_t> last_used_cycles;
   uint64_t cycle = 0;

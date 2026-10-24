@@ -13,6 +13,11 @@ export AFAR_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # published purge policy. Set AFAR_ASSETS before sourcing to relocate them.
 export AFAR_ASSETS="${AFAR_ASSETS:-/data/cmpe295-bond/${USER}/afar}"
 
+# Result records (baselines, later campaigns). Defaults from $USER, not from
+# AFAR_ASSETS, so it stays writable when AFAR_ASSETS is a teammate's
+# read-only copy.
+export AFAR_RESULTS="${AFAR_RESULTS:-/data/cmpe295-bond/${USER}/afar/results}"
+
 # Keep Apptainer's layer cache and build space off /home.
 export APPTAINER_CACHEDIR="${AFAR_ASSETS}/apptainer/cache"
 export APPTAINER_TMPDIR="${AFAR_ASSETS}/apptainer/tmp"

@@ -88,11 +88,21 @@ runtime_checks() {
         fi
     done
 
+    # Jobs only read AFAR_ASSETS, so a teammate's read-only copy is fine;
+    # only make llm-fetch needs to write there. Results must be writable.
     if mkdir -p "$AFAR_ASSETS" 2>/dev/null && touch "$AFAR_ASSETS/.write-test" 2>/dev/null; then
         rm -f "$AFAR_ASSETS/.write-test"
         pass "AFAR_ASSETS writable ($AFAR_ASSETS)"
+    elif [[ -d "$AFAR_ASSETS" && -r "$AFAR_ASSETS" && -x "$AFAR_ASSETS" ]]; then
+        pass "AFAR_ASSETS readable: shared copy, read-only ($AFAR_ASSETS); make llm-fetch would need write access"
     else
-        fail "AFAR_ASSETS not writable ($AFAR_ASSETS); set AFAR_ASSETS before sourcing env/site.sh"
+        fail "AFAR_ASSETS neither writable nor readable ($AFAR_ASSETS); set AFAR_ASSETS before sourcing env/site.sh"
+    fi
+    if mkdir -p "$AFAR_RESULTS" 2>/dev/null && touch "$AFAR_RESULTS/.write-test" 2>/dev/null; then
+        rm -f "$AFAR_RESULTS/.write-test"
+        pass "AFAR_RESULTS writable ($AFAR_RESULTS)"
+    else
+        fail "AFAR_RESULTS not writable ($AFAR_RESULTS); set AFAR_RESULTS before sourcing env/site.sh"
     fi
     if command -v apptainer >/dev/null; then
         pass "apptainer $(apptainer --version | awk '{print $NF}')"

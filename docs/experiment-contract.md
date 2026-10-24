@@ -36,7 +36,7 @@ There is one hand-written JSON file per experiment, `configs/experiments/<experi
 | `champsim` | `repo`, `commit`, `base_config`, `target_cache: "LLC"`, `module_name: "evolved_repl"` |
 | `simulation` | `warmup_instructions`, `simulation_instructions` |
 | `baseline` | `policy: "lru"` |
-| `traces` | list of `{id, path, sha256}`; traces live outside the repo |
+| `traces` | list of `{id, path, sha256}`; traces live outside the repo, and `path` is relative to `$AFAR_ASSETS` (for example `traces/602.gcc_s-1850B.champsimtrace.xz`), so one manifest works for every user |
 | `limits` | `build_timeout_s`, `run_timeout_s`, `max_source_bytes` |
 | `fitness` | `name: "geomean_ipc_speedup"`, `version` |
 
@@ -53,6 +53,10 @@ There is one JSON record per (candidate, trace). Every pair in the manifest gets
 - **Metrics:** `ipc`, `instructions`, `cycles`, `llc_demand_mpki`, `llc_hit_rate`.
   - They are flat and non-null exactly when `status == "completed"`.
   - They come from the ROI section of ChampSim's `--json` output, never from stdout.
+  - **Metric definitions v1** (`evaluator/results.py`):
+    - `ipc` = instructions / cycles, for core 0.
+    - Demand accesses are LLC `LOAD` + `RFO`. `llc_demand_mpki` = 1000 × demand misses / instructions, and `llc_hit_rate` = demand hits / demand accesses (0.0 if there are none).
+  - Records are written to `$AFAR_RESULTS` (`env/site.sh`). Baselines go to `baselines/<experiment>/<trace>.json`, with ChampSim's raw log and JSON in `raw/` beside them. Writes are atomic (a temporary file, then a rename).
 - **Provenance:**
   - `logs`: build log, run log and ChampSim JSON path
   - `env`: `champsim_commit`, `base_config_sha256`, `config_sha256`, `project_git_commit`, `hostname`, `cxx_version`, `slurm_job_id`, `slurm_array_task_id`

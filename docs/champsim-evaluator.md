@@ -91,7 +91,7 @@ All score 1.0 here, because the stub only checks that a candidate compiles.
 | Compile check | 0.7 s on the node |
 | Largest prompt | 3,806 tokens (+ 4,096 `max_tokens` ≤ 16,384) |
 
-**Open before any campaign:** the seed's header comment ("…a header-only port of replacement/lru") invites edits outside the block. All 5 rejections in 93495 were the model renaming it. Make it policy-neutral (`docs/status.md`, issue 1).
+**Fixed in M1:** the seed's header comment ("…a header-only port of replacement/lru") invited edits outside the block; all 5 rejections in 93495 were the model renaming it. That note now sits inside the EVOLVE-BLOCK, and the fixed header is policy-neutral.
 
 **Change after 93458:** `<random>` is now in the seed's fixed includes and in the system message's header list, since 2 of 9 rewrites added it themselves.
 - **Why now:** the seed's fixed text is what every candidate is compared against, so it has to settle before any campaign.

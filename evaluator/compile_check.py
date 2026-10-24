@@ -24,7 +24,6 @@ import argparse
 import functools
 import os
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
@@ -34,6 +33,10 @@ from pathlib import Path
 from openevolve.evaluation_result import EvaluationResult
 
 ROOT = Path(__file__).resolve().parent.parent
+# OpenEvolve imports this file by path, so make the evaluator package importable.
+sys.path.insert(0, str(ROOT))
+from evaluator.proc import run_killable  # noqa: E402
+
 CHAMPSIM = ROOT / "external" / "ChampSim"
 SEED = ROOT / "seeds" / "evolved_repl.h"
 
@@ -114,26 +117,6 @@ def static_problem(code, seed):
     if CLASS_HEAD not in code:
         return f"'{CLASS_HEAD}' is missing"
     return None
-
-
-def run_killable(cmd, cwd, timeout):
-    """Run cmd in its own process group and kill the whole group on timeout.
-
-    subprocess.run(timeout=) kills only the direct child (the g++ driver, not
-    cc1plus), and preexec_fn is unsafe here because OpenEvolve calls evaluate()
-    in a thread, so this uses Popen(process_group=0) and os.killpg.
-    Returns (exit code, or None after a timeout; output; seconds).
-    """
-    start = time.monotonic()
-    proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                            errors="replace", process_group=0)
-    try:
-        out, _ = proc.communicate(timeout=timeout)
-        return proc.returncode, out, time.monotonic() - start
-    except subprocess.TimeoutExpired:
-        os.killpg(proc.pid, signal.SIGKILL)
-        out, _ = proc.communicate()
-        return None, out, time.monotonic() - start
 
 
 @functools.lru_cache(maxsize=None)

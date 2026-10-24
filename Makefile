@@ -23,6 +23,7 @@ CHECKPOINT ?=
 ITERATIONS ?=
 # make llm-fetch: which pinned LLM assets to download.
 LLM_PARTS  ?= sandbox model
+EXP        ?=
 
 CHAMPSIM_DIR    := external/ChampSim
 BASELINE_CONFIG := configs/champsim/baseline.json
@@ -40,15 +41,19 @@ BUILD_ENV := source env/modules.sh &&
 # Run-time steps (either cluster): shared paths only, no modules.
 RUN_ENV := source env/site.sh &&
 # A clean environment like a batch job's, for proving run-time steps need no modules.
-CLEAN_ENV := env -i HOME="$$HOME" USER="$$USER" PATH=/usr/bin:/bin
+# AFAR_ASSETS/AFAR_RESULTS pass through when set, as sbatch passes them to jobs.
+CLEAN_ENV := env -i HOME="$$HOME" USER="$$USER" PATH=/usr/bin:/bin \
+    $${AFAR_ASSETS:+AFAR_ASSETS=$$AFAR_ASSETS} $${AFAR_RESULTS:+AFAR_RESULTS=$$AFAR_RESULTS}
 
 # Wheels only, built for old glibc, so venvs made here also run on COE-HPC3.
-PIP_FLAGS := --quiet --disable-pip-version-check --only-binary=:all:
+# No cache: pip's default ~/.cache/pip grows on the nearly full /home.
+PIP_FLAGS := --quiet --disable-pip-version-check --only-binary=:all: --no-cache-dir
 # Bundle libstdc++/libgcc so the binary needs only glibc on COE-HPC3.
 CHAMPSIM_LDFLAGS := -static-libstdc++ -static-libgcc
 
 .PHONY: help setup submodules python venvs vcpkg champsim check check-runtime smoke \
-        env-record lock clean distclean oe-check-config oe-toy-manual oe-summary oe-compile-selftest llm-fetch
+        env-record lock clean distclean oe-check-config oe-toy-manual oe-summary oe-compile-selftest \
+        evaluator-selftest baseline-local llm-fetch
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -119,6 +124,14 @@ oe-summary: venvs ## Summarize an OpenEvolve run, one row per iteration (RUN=run
 
 oe-compile-selftest: venvs ## Check the R7 compile evaluator on variants of the seed (after make champsim)
 	$(BUILD_ENV) $(VENV_DIR)/controller/bin/python evaluator/compile_check.py --selftest
+
+evaluator-selftest: venvs ## Self-test the result-record and manifest modules (standard library only)
+	$(RUN_ENV) $(VENV_DIR)/evaluator/bin/python -m evaluator.results --selftest
+	$(RUN_ENV) $(VENV_DIR)/evaluator/bin/python -m evaluator.manifest --selftest
+
+baseline-local: venvs ## LRU baseline for EXP=<manifest id> on this host; seconds-long manifests only (smoke-tiny-v1)
+	@[ -n "$(EXP)" ] || { echo "usage: make baseline-local EXP=smoke-tiny-v1" >&2; exit 2; }
+	$(RUN_ENV) $(VENV_DIR)/evaluator/bin/python -m evaluator.run_baseline --manifest configs/experiments/$(EXP).json
 
 llm-fetch: venvs ## Download the pinned model and unpack the vLLM sandbox into AFAR_ASSETS (LLM_PARTS=; needs internet)
 	$(BUILD_ENV) scripts/llm_fetch.sh $(LLM_PARTS)
