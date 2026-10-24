@@ -6,7 +6,7 @@ import subprocess
 import time
 
 
-def run_killable(cmd, cwd, timeout, stdout=subprocess.PIPE):
+def run_killable(cmd, cwd, timeout, stdout=subprocess.PIPE, env=None):
     """Run cmd in its own process group and kill the whole group on timeout.
 
     subprocess.run(timeout=) kills only the direct child (a compiler driver but
@@ -15,12 +15,13 @@ def run_killable(cmd, cwd, timeout, stdout=subprocess.PIPE):
     Popen(process_group=0) and os.killpg.
 
     stdout is a pipe by default, or an open file to write the output to.
+    env replaces the environment when given (default: inherit).
     Returns (exit code, or None after a timeout; output text, "" when stdout
     is a file; seconds).
     """
     start = time.monotonic()
     proc = subprocess.Popen(cmd, cwd=cwd, stdout=stdout, stderr=subprocess.STDOUT, text=True,
-                            errors="replace", process_group=0)
+                            errors="replace", process_group=0, env=env)
     try:
         out, _ = proc.communicate(timeout=timeout)
         return proc.returncode, out or "", time.monotonic() - start

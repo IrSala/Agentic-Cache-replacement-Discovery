@@ -2,6 +2,32 @@
 
 How OpenEvolve's candidates, LLC replacement policies in one C++ header, are checked. The rules come from `docs/experiment-contract.md`. This page covers how the evaluator implements them and what was learned on the way.
 
+## M2 part A: building candidates on HPC3 (toolchain test)
+
+`evaluator/champsim_build.py` builds ChampSim in a **private copy of the source tree** for every build. ChampSim's Makefile must run inside a tree and does `include _configuration.mk`, and GNU make looks in the current directory before `-I` directories. The shared `external/ChampSim` already holds the baseline's `_configuration.mk`, so building there would silently use the baseline's build fragment.
+- A copy is 3.8 MB: no `.git`, vcpkg or build outputs, with `vcpkg_installed` symlinked.
+- Copies never write to `external/ChampSim`, and can be used concurrently.
+
+`evaluator/toolchain_test.py` (`slurm/toolchain_test.sbatch`) measured what candidate builds cost:
+
+| | coe-hpc1 (quick, local) | HPC3 job 94191 (`c18`) |
+|---|---|---|
+| Compiler | Spack gcc 12.2.0, static libstdc++ | `/usr/bin/g++` 11.5.0 (Red Hat 11.5.0-14). **Dynamic** libstdc++, since the nodes have no `libstdc++.a`; fine for binaries that only run on HPC3 nodes |
+| Other tools | GNU Make 3.82 | GNU Make 4.3, Python 3.9, `/usr/bin/prlimit`; CPU Xeon E5-2660 v4 @ 2.0 GHz |
+| Full build of LRU (41 objects) | 60.9 s (`-j2`) | 53.3 s (`-j4`) |
+| Rebuild after copying the built tree and adding the seed via `--replacement-dir` | 8.7 s | 10.5 s (20% of a full build) |
+| Objects recompiled for a new candidate | 2: `<build_id>_main.o`, `generated_environment.o` | the same 2 |
+| `smoke-tiny-v1` cycles: LRU / seed / SRRIP | 43,703 / 43,703 | 43,703 / 43,703 / 43,703 |
+| `smoke-v1` (6M instructions): trace on `/data` vs a local copy | not run | 108.7 s vs 109.5 s |
+
+**What it showed:**
+- **gcc 11.5 links against the gcc-12-built vcpkg libraries**, so the fallback (rebuilding vcpkg on HPC3) isn't needed.
+- **Results don't depend on the compiler:** gcc 11.5 and gcc 12 builds give identical cycles, including 18,624,235 on `smoke-v1` (M1's baseline).
+- **The header-only seed works** through `--replacement-dir` and reproduces LRU exactly.
+- **Only 2 objects depend on the candidate:** the generated `core_inst.cc.inc` is compiled into `generated_environment.cc` and `main.cc`, so a prebuilt base tree saves about 80% of build time.
+- **Runs dominate the cost:** about 109 s per 6M-instruction trace, against a 53 s full build. ChampSim is limited by these 2.0 GHz Broadwell CPUs (about 55K instructions/s), not by NFS, so traces don't need copying to the node.
+- **The tiny run can't tell policies apart:** at 10K instructions there are no LLC hits, so SRRIP matches LRU. Fitness differences need `smoke-v1` or longer runs.
+
 ## R7: compile-only stub
 
 `evaluator/compile_check.py` is a stub. It checks a candidate and compiles it, but builds no binary and runs no simulation (that's Phase 3), so every candidate that compiles scores 1.0.

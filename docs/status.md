@@ -45,6 +45,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | R6: real model on the toy, then resume | 93362 (diff mode: 0/10 applied), 93369, 93386 | Full rewrites applied 9/10; resume continued at iteration 11 |
 | R7: real model on the ChampSim policy | 93458 (`cs004`) | 6 of 9 rewrites compiled; markers kept 9/9 |
 | G: fresh clone of GitHub `main` | setup on coe-hpc1; 93489 (`c19`), 93495 (`cs001`) | Everything reproduced, including smoke at 43,703 cycles; 5 of 10 rewrites compiled |
+| M2 part A: toolchain test | 94191 (`c18`) | gcc 11.5 builds and links; LRU, seed and SRRIP give 43,703 cycles; the gcc 11.5 build gives `smoke-v1`'s 18,624,235 cycles, the same as gcc 12 |
 | M1: LRU baselines in Slurm | 94177 (`c11`) | `smoke-tiny-v1`: 43,703 cycles, the same as coe-hpc1. `smoke-v1`: 18,624,235 cycles, IPC 0.2685, LLC demand MPKI 17.80, hit rate 0.11%. Both records validate |
 
 ## Measurements
@@ -59,7 +60,8 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | Compile check | 0.7 s on a GPU node (gcc 11.5), 1.2 s on coe-hpc1 (gcc 12.2) | R7 |
 | Host memory (`sacct` MaxRSS) | 3.1–4.2 GB; jobs request 24G | R5–R7 |
 | Largest prompt | 7,204 tokens (toy), 4,003 (C++) | R6, G |
-| ChampSim speed, baseline binary | **about 56,000 instructions/s** on `c11` (6M instructions in 106.5 s, trace read from `/data`). At this speed, 50M warmup + 200M simulated instructions would take about 75 min per trace. Simulation length and trace count are the main cost levers for M3–M5; whether NFS reads slow it down is to be checked in M2 | M1 |
+| ChampSim speed, baseline binary | **about 55,000 instructions/s** on `c11` and `c18` (Xeon E5-2660 v4, 2.0 GHz): 6M instructions in 106–109 s. A local trace copy is no faster, so the CPU is the limit, not NFS. At this speed, 50M warmup + 200M simulated instructions would take about 75 min per trace, so simulation length and trace count are the main cost levers for M3–M5 | M1, M2 part A |
+| Candidate build on an HPC3 node (gcc 11.5, `-j4`) | full build 53.3 s; after copying a built tree, 10.5 s (2 objects recompiled) | M2 part A |
 
 ## Decisions and why
 
@@ -83,7 +85,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | 2 | The compile-only stub scores every compiling candidate 1.0 | No fitness signal; OpenEvolve keeps the seed as "best" on ties | Phase 3: real build plus ChampSim run | Next phase |
 | 3 | `-fsyntax-only` doesn't link | A member declared but never defined passes | Phase 3's real build | Next phase |
 | 4 | Compiler feedback rarely reaches the model | OpenEvolve shows artifacts only to a program's children, and failures score 0 | Accept, or a custom prompt template later | Known |
-| 5 | Which compiler builds candidates on HPC3? | coe-hpc1 built ChampSim and its vcpkg libraries with gcc 12.2; HPC3 nodes have only gcc 11.5 | **Decided 2026-10-23:** the nodes' system gcc 11.5, with no sandbox. M2 starts with a test build against the gcc-12 libraries; the fallback is rebuilding vcpkg offline on HPC3 | Decided; tested in M2 |
+| 5 | Which compiler builds candidates on HPC3? | coe-hpc1 built ChampSim and its vcpkg libraries with gcc 12.2; HPC3 nodes have only gcc 11.5 | **Decided 2026-10-23:** the nodes' system gcc 11.5, with no sandbox. **Tested (job 94191):** it builds and links against the gcc-12 libraries, with dynamic libstdc++ | **Resolved** |
 | 6 | The only trace is a smoke trace with flat fitness | LRU, SRRIP, DRRIP and SHiP land within 0.2% IPC on it | Calibrate LLC-sensitive traces (contract §2) | Open |
 | 7 | `env/check.sh` requires `AFAR_ASSETS` to be writable | Teammates sharing a read-only copy fail `make check` | `check.sh` accepts a readable copy; `make check` passes `AFAR_ASSETS`/`AFAR_RESULTS` through its clean environment; `llm-fetch` refuses an unwritable one with a clear message | **Fixed in M1** |
 | 8 | pip's cache isn't redirected | `~/.cache/pip` is 3 GB on the 99%-full `/home` (mostly older than this repo) | The Makefile runs pip with `--no-cache-dir`. The existing 3 GB is the user's to delete | **Fixed in M1** |
@@ -98,6 +100,6 @@ The plan to an autonomous, multi-node research system is in **`docs/roadmap.md`*
 |---|---|
 | **M0** HPC3 capability check | **Done (2026-10-23).** Jobs can submit jobs; `scrontab` is disabled, so the watchdog uses `afternotok` handlers plus a `--begin` heartbeat; `MaxArraySize` is 1001; `JobRequeue=1`; `/bin/mail` is available |
 | **M1** Baseline in Slurm, result schema, manifest v1, and issues 1, 7 and 8 | **Done (2026-10-23).** Job 94177 reproduced 43,703 cycles on HPC3 and wrote validated `smoke-v1` baselines. Issues 1, 7 and 8 are fixed |
-| **M2** Real evaluator (resolves issues 2, 3 and 5) | **Next.** Issue 5 is decided: build with the nodes' gcc 11.5 and no sandbox, starting with a toolchain test job. Also measure whether copying traces to node-local `/tmp` speeds up runs |
+| **M2** Real evaluator (resolves issues 2, 3 and 5) | **Part A done (job 94191):** gcc 11.5 builds ChampSim on HPC3; a new candidate recompiles 2 objects (10.5 s vs a 53 s full build); a local trace copy doesn't help. **Part B next:** the evaluator itself |
 | M3 Trace calibration (issue 6) · M4 Single-job prototype with real fitness | Planned |
 | M5 Staged generations (issue 10) · M6 Long-run hardening · M7 Comparing levers | Planned |
