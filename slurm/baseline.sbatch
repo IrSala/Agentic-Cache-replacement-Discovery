@@ -1,6 +1,7 @@
 #!/bin/bash
-# M1: run the LRU baseline for each manifest on an HPC3 CPU node and write
-# validated result records to $AFAR_RESULTS/baselines/<experiment>/.
+# M1: reference runs of the coe-hpc1-built baseline binary on an HPC3 CPU node,
+# written as validated records to $AFAR_RESULTS/reference/<experiment>/.
+# (Scoring baselines come from slurm/evaluate.sbatch, TARGETS=baseline.)
 #
 # Submit from ~/AFAR_HPC on coe-hpc3 (g17), checking the request first:
 #     sbatch --test-only slurm/baseline.sbatch
@@ -44,6 +45,6 @@ for exp in $manifests; do
     # In the background with wait, so a SIGTERM from --signal reaches the shell promptly.
     "$py" -m evaluator.run_baseline --manifest "$m" "${expect[@]}" &
     wait $!
-    "$py" -m evaluator.results --validate "${AFAR_RESULTS}/baselines/${exp}"/*.json
+    "$py" -m evaluator.results --validate "${AFAR_RESULTS}/reference/${exp}"/*.json
 done
 echo "done"

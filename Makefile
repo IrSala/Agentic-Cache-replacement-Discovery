@@ -53,7 +53,7 @@ CHAMPSIM_LDFLAGS := -static-libstdc++ -static-libgcc
 
 .PHONY: help setup submodules python venvs vcpkg champsim check check-runtime smoke \
         env-record lock clean distclean oe-check-config oe-toy-manual oe-summary oe-compile-selftest \
-        evaluator-selftest baseline-local llm-fetch
+        evaluator-selftest evaluate-selftest baseline-local llm-fetch
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -125,9 +125,15 @@ oe-summary: venvs ## Summarize an OpenEvolve run, one row per iteration (RUN=run
 oe-compile-selftest: venvs ## Check the R7 compile evaluator on variants of the seed (after make champsim)
 	$(BUILD_ENV) $(VENV_DIR)/controller/bin/python evaluator/compile_check.py --selftest
 
-evaluator-selftest: venvs ## Self-test the result-record and manifest modules (standard library only)
+evaluator-selftest: venvs ## Self-test results, manifests, static checks and fitness (seconds; standard library only)
 	$(RUN_ENV) $(VENV_DIR)/evaluator/bin/python -m evaluator.results --selftest
 	$(RUN_ENV) $(VENV_DIR)/evaluator/bin/python -m evaluator.manifest --selftest
+	$(RUN_ENV) $(VENV_DIR)/evaluator/bin/python -m evaluator.static_checks --selftest
+	$(RUN_ENV) $(VENV_DIR)/evaluator/bin/python -m evaluator.fitness --selftest
+
+evaluate-selftest: venvs ## Every evaluation status on built and run variants of the seed (a few minutes; Spack gcc 12 here)
+	$(BUILD_ENV) $(RUN_ENV) AFAR_CXX=$$(command -v g++) \
+	    $(VENV_DIR)/evaluator/bin/python -m evaluator.evaluate_candidate --selftest --jobs $(JOBS)
 
 baseline-local: venvs ## LRU baseline for EXP=<manifest id> on this host; seconds-long manifests only (smoke-tiny-v1)
 	@[ -n "$(EXP)" ] || { echo "usage: make baseline-local EXP=smoke-tiny-v1" >&2; exit 2; }

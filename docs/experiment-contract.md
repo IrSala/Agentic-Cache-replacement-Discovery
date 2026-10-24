@@ -24,6 +24,7 @@ Scope: evolve the **LLC replacement policy** of ChampSim at the pinned commit. E
   - an EVOLVE-BLOCK marker is missing, or there is more than one block
   - any text outside the EVOLVE-BLOCK differs from the seed's. Trailing whitespace on each line and at the end of the file is ignored; OpenEvolve's full-rewrite parser strips the end.
   - the `evolved_repl` class declaration is missing
+  - the EVOLVE-BLOCK uses a forbidden construct: process, file or environment calls, inline assembly, `__attribute__`, threads, or preprocessor lines (`evaluator/static_checks.py`). This is a safeguard, not a sandbox.
 - The evaluator enforces the EVOLVE-BLOCK itself, because OpenEvolve 0.4.0's `enforce_evolve_blocks` never reaches its workers (`docs/llm-serving.md`, R6). Its rejection note (an artifact) says what changed, mainly for people reading the run: OpenEvolve shows a program's artifacts only in prompts that use it as the parent (`process_parallel.py:156`), and a rejected candidate scores 0, so it rarely is one. The system prompt is what tells the model to keep the markers and fixed code. Revisit when an OpenEvolve release has the fix: OpenEvolve would then restore outside edits instead, and this check stays as a backstop.
 
 ## 2. Experiment manifest
@@ -56,7 +57,10 @@ There is one JSON record per (candidate, trace). Every pair in the manifest gets
   - **Metric definitions v1** (`evaluator/results.py`):
     - `ipc` = instructions / cycles, for core 0.
     - Demand accesses are LLC `LOAD` + `RFO`. `llc_demand_mpki` = 1000 × demand misses / instructions, and `llc_hit_rate` = demand hits / demand accesses (0.0 if there are none).
-  - Records are written to `$AFAR_RESULTS` (`env/site.sh`). Baselines go to `baselines/<experiment>/<trace>.json`, with ChampSim's raw log and JSON in `raw/` beside them. Writes are atomic (a temporary file, then a rename).
+  - Records are written to `$AFAR_RESULTS` (`env/site.sh`), atomically (a temporary file, then a rename), with ChampSim's raw log and JSON in `raw/` beside them:
+    - `baselines/<experiment>/<trace>.json`: the LRU baseline, built by the same pipeline as candidates (`evaluate_candidate --baseline`)
+    - `evaluations/<experiment>/<candidate id>/`: candidates, plus a `summary.json`
+    - `reference/<experiment>/`: M1's runs of the coe-hpc1-built binary, a reproducibility check only
 - **Provenance:**
   - `logs`: build log, run log and ChampSim JSON path
   - `env`: `champsim_commit`, `base_config_sha256`, `config_sha256`, `project_git_commit`, `hostname`, `cxx_version`, `slurm_job_id`, `slurm_array_task_id`
@@ -72,7 +76,8 @@ combined_score = geometric_mean(speedup_t)   if every trace completed   (1.0 = L
                = 0.0                         if any trace has a candidate-class failure
 ```
 
-- `combined_score` is the only fitness key OpenEvolve sees.
+- `combined_score` is the only fitness key OpenEvolve sees. Fitness functions are named and versioned in `evaluator/fitness.py`, and the manifest picks one.
+- A candidate's score is compared only with a baseline from the same ChampSim commit and compiler; otherwise it's `infra_error`.
 - A missing baseline, a missing record or any `infra_error` raises an error instead of producing a score.
 - ChampSim is deterministic for a fixed binary, config and trace, so each pair runs once.
 

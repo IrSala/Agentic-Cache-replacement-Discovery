@@ -8,6 +8,7 @@ outputs; vcpkg_installed is symlinked). Copies are safe to use concurrently
 and never touch the shared tree (BUILD_PLAN 2.2).
 """
 
+import hashlib
 import json
 import os
 import re
@@ -99,7 +100,16 @@ def build(tree, cxx, jobs, timeout, static=None):
     return StepResult(ok=code == 0, seconds=seconds, exit_code=code, log=out, compiled=compiled)
 
 
-def run(binary, trace, warmup, sim, json_out, log_path, timeout, cwd, limits=None):
+def module_sha256(name):
+    """Identity of a built-in replacement module: sha256 over its files, in name order."""
+    h = hashlib.sha256()
+    for path in sorted((CHAMPSIM / "replacement" / name).iterdir()):
+        if path.is_file():
+            h.update(path.name.encode() + b"\0" + path.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
+def run(binary, trace, warmup, sim, json_out, log_path, timeout, cwd, limits=None, env=None):
     """Run ChampSim on one trace, optionally under prlimit (limits: as_bytes, fsize_bytes, cpu_s)."""
     cmd = [str(binary), "--warmup-instructions", str(warmup), "--simulation-instructions", str(sim),
            "--json", str(json_out), str(trace)]
@@ -107,5 +117,5 @@ def run(binary, trace, warmup, sim, json_out, log_path, timeout, cwd, limits=Non
         cmd = ["prlimit", f"--as={limits['as_bytes']}", f"--fsize={limits['fsize_bytes']}",
                f"--cpu={limits['cpu_s']}", "--"] + cmd
     with open(log_path, "w") as log:
-        code, _, seconds = run_killable(cmd, cwd, timeout, stdout=log)
+        code, _, seconds = run_killable(cmd, cwd, timeout, stdout=log, env=env)
     return StepResult(ok=code == 0, seconds=seconds, exit_code=code, log=Path(log_path).read_text(errors="replace"))

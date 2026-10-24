@@ -28,6 +28,73 @@ How OpenEvolve's candidates, LLC replacement policies in one C++ header, are che
 - **Runs dominate the cost:** about 109 s per 6M-instruction trace, against a 53 s full build. ChampSim is limited by these 2.0 GHz Broadwell CPUs (about 55K instructions/s), not by NFS, so traces don't need copying to the node.
 - **The tiny run can't tell policies apart:** at 10K instructions there are no LLC hits, so SRRIP matches LRU. Fitness differences need `smoke-v1` or longer runs.
 
+## M2 part B: the `champsim_ipc` evaluator (real fitness)
+
+Candidates are built into ChampSim, run on the manifest's traces, and scored with `geomean_ipc_speedup@1` against an LRU baseline built the same way (contract §4).
+
+| Entry point | Use |
+|---|---|
+| `python -m evaluator.evaluate_candidate --manifest M --baseline` | the LRU baseline for every trace in `M`; candidates are scored against it, so run it first |
+| `… --candidate FILE` / `… --builtin srrip` | evaluate a candidate header, or a built-in ChampSim policy, against that baseline |
+| `evaluator/openevolve_champsim.py` | OpenEvolve's `evaluate(program_path)`. The manifest comes from `AFAR_EXPERIMENT`; see the file for the other variables |
+| `sbatch slurm/evaluate.sbatch` | the same on an HPC3 CPU node; `TARGETS` lists what to run |
+| `make evaluate-selftest` | every status on built and run variants of the seed (coe-hpc1, about 2.5 min) |
+
+**Stages** (`evaluator/policies/base.py`; the policy is `evaluator/policies/champsim_ipc.py`):
+1. **Static checks** (`evaluator/static_checks.py`): the EVOLVE-BLOCK rules, plus a list of forbidden constructs in the block. These are process, file and environment calls (`system`, `popen`, `fork`/`exec*`, `fopen`, `std::*fstream`, `socket`, `getenv`, …), inline assembly, `__attribute__`, `std::thread`/`async`, and preprocessor lines. Names with ordinary standard-library uses, such as `std::remove` and `std::bind`, are allowed.
+2. **Build:**
+   - First `compile_only`'s syntax-and-hook check, which takes seconds and catches a hook ChampSim would silently never call.
+   - Then the **prebuilt base tree** (`evaluator/prebuilt.py`): copy it, add the candidate via `--replacement-dir`, and `make`. Only 2 objects recompile.
+   - The tree lives at `$AFAR_ASSETS/champsim-prebuilt/<commit>-<compiler>-<hash>/`. It's built once, under a lock, by whichever evaluation needs it first. Its name changes whenever the ChampSim commit, the compiler or the base config does, so a stale tree is never used.
+   - If no tree exists and `AFAR_ASSETS` isn't writable (a teammate's shared copy), the evaluation does a full build instead.
+3. **Run:** every trace runs up to `--jobs` at a time, each under `prlimit` (8 GiB address space, 1 GiB files, CPU time = timeout + 60 s) and a process-group wall-clock timeout, in its own directory used as `HOME`.
+4. **Score:** fitness is 0.0 if any trace failed for a candidate reason. An infrastructure failure, a missing baseline, or a baseline built by a different ChampSim commit or compiler raises `infra_error` instead of producing a score.
+
+**Where results go** (`$AFAR_RESULTS`):
+
+| Path | Contents |
+|---|---|
+| `baselines/<exp>/<trace>.json`, `raw/`, `summary.json` | the pipeline's LRU baseline, which scoring uses |
+| `evaluations/<exp>/<candidate id>/` | one record per trace, `raw/` (ChampSim log and JSON), and `summary.json` (status, fitness, speedups, build details). Reused if the same candidate, manifest and policy are evaluated again |
+| `reference/<exp>/` | M1's runs of the coe-hpc1-built binary (`slurm/baseline.sbatch`), kept as a reproducibility check |
+| `toolchain/<job>.json` | part A's measurements |
+
+**Every status is reproduced by the self-test** (coe-hpc1, gcc 12):
+
+| Variant of the seed | Status |
+|---|---|
+| The seed itself | `completed`, fitness **exactly 1.0**, 43,703 cycles like LRU |
+| Built-in SRRIP | `completed` (at 10K instructions every policy gives 43,703 cycles) |
+| `std::system(...)` in the block; an edit outside the block | `invalid_candidate` |
+| A syntax error; a hook with the wrong signature | `compile_failed` (from the syntax check) |
+| A member that's declared and called but never defined | `compile_failed` (from the link). This closes the old syntax-only gap |
+| An out-of-range `.at()` in `replacement_cache_fill` | `runtime_failed` (uncaught exception, so the process aborts with signal 6) |
+| An endless loop in `replacement_cache_fill` | `timeout` (process group killed after the manifest's limit) |
+
+The runtime fixtures live in `replacement_cache_fill` on purpose. ChampSim calls `find_victim` only when a set is full (`src/cache.cc:174-176`), and the update hook mostly on hits. A 10K-instruction run has neither, while `replacement_cache_fill` runs on every LLC fill.
+
+**No sandbox** (team decision, 2026-10-23): candidate code runs with the submitting user's permissions. The forbidden-call list, `prlimit`, per-run directories and node-local workspaces are safeguards, not isolation.
+
+**HPC3 acceptance (job 94248, `c11`, gcc 11.5.0):**
+- The prebuilt tree `410cee6-gcc11.5.0-59bdcec1` was built in 56 s.
+- The self-test passed 10 of 10.
+- Each candidate's build from the prebuilt tree took 9–10 s.
+
+Results on `smoke-v1` (1M warmup + 5M simulated instructions):
+
+| Policy | Fitness | Cycles | LLC LOAD hits / misses | LLC WRITE hits / misses |
+|---|---|---|---|---|
+| LRU (baseline) | n/a | 18,624,235 | 102 / 88,984 | 153 / 0 |
+| seed | **1.0 exactly** | 18,624,235 | the same as LRU | the same as LRU |
+| SRRIP | 0.99936 | 18,636,235 | 99 / 88,987 | 33 / 120 |
+| DRRIP | 1.0 | 18,624,235 | 110 / 88,976 | 138 / 15 |
+| SHiP | 1.00129 | 18,600,235 | 131 / 88,955 | 145 / 8 |
+
+**What the table shows:**
+- The seed reproduces LRU exactly, and the pipeline tells SRRIP and SHiP apart from LRU.
+- **DRRIP really runs** (its LLC hits and misses differ from LRU's), but its cycle count is identical. On this trace the LLC barely matters (about 0.1% hit rate; plumbing only, per contract §2).
+- **Cycle counts on `smoke-v1` move in steps of 12,000 cycles** (+12,000 for SRRIP, −24,000 for SHiP, ±0 for DRRIP), so fitness here has a resolution of about 0.064%. The cause isn't explained yet: ChampSim checks for phase completion on every cycle. To be checked on M3's LLC-sensitive traces and longer runs.
+
 ## R7: compile-only stub
 
 `evaluator/compile_check.py` is a stub. It checks a candidate and compiles it, but builds no binary and runs no simulation (that's Phase 3), so every candidate that compiles scores 1.0.

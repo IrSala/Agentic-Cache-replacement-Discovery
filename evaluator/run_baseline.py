@@ -1,10 +1,15 @@
-"""M1: run the LRU baseline for every trace in a manifest and write result records.
+"""M1: reference runs of the coe-hpc1-built baseline binary (build/baseline/champsim).
+
+Since M2, the LRU baselines that candidates are scored against come from the
+same pipeline as candidates (evaluate_candidate --baseline, in baselines/).
+These reference runs check that the shipped binary still reproduces its
+numbers on HPC3 (smoke-tiny-v1: 43,703 cycles).
 
     python -m evaluator.run_baseline --manifest configs/experiments/smoke-v1.json
 
 For each trace it runs the baseline binary with the manifest's warmup and
 simulation counts, under a process-group timeout, and writes
-$AFAR_RESULTS/baselines/<experiment>/<trace>.json (the record) and
+$AFAR_RESULTS/reference/<experiment>/<trace>.json (the record) and
 raw/<trace>.{log,champsim.json} beside it, so <experiment>/*.json are all records.
 
 A baseline must succeed (contract §4: a missing baseline stops an
@@ -133,7 +138,7 @@ def main():
         for p in found:
             print(f"  FAIL  {p}")
         return 1
-    out_dir = results_dir() / "baselines" / manifest.experiment_id
+    out_dir = results_dir() / "reference" / manifest.experiment_id
     out_dir.mkdir(parents=True, exist_ok=True)
     env = results.environment(args.binary, args.base_config, args.base_config)
     candidate_sha256 = results.sha256_bytes(*(p.read_bytes() for p in LRU_SOURCES))

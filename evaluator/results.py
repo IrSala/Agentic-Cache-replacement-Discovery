@@ -104,14 +104,15 @@ def compiler_of(binary):
     return "; ".join(found) or "unknown"
 
 
-def environment(binary, base_config, config):
+def environment(binary, base_config, config, cxx_version=None):
+    """Provenance for a record. With no binary (a failed build), pass cxx_version instead."""
     return {
         "champsim_commit": champsim_commit(),
         "base_config_sha256": sha256_bytes(Path(base_config).read_bytes()),
         "config_sha256": sha256_bytes(Path(config).read_bytes()),
         "project_git_commit": project_commit(),
         "hostname": socket.gethostname(),
-        "cxx_version": compiler_of(binary),
+        "cxx_version": compiler_of(binary) if binary and Path(binary).exists() else (cxx_version or "unknown"),
         "slurm_job_id": os.environ.get("SLURM_JOB_ID"),
         "slurm_array_task_id": os.environ.get("SLURM_ARRAY_TASK_ID"),
     }

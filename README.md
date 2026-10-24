@@ -155,7 +155,8 @@ sbatch --exclude=cs002 slurm/openevolve_champsim_compile.sbatch
 | `oe-summary RUN=…` | one row per iteration of an OpenEvolve run: outcome or evaluator status, score, LLM and evaluation seconds, tokens |
 | `oe-compile-selftest` | check the compile-only evaluator on variants of the seed, covering every status and the timeout kill (after `make champsim`) |
 | `evaluator-selftest` | self-test the result-record and manifest modules (`evaluator/results.py`, `evaluator/manifest.py`) |
-| `baseline-local EXP=…` | run the LRU baseline for a manifest on this host, writing records to `$AFAR_RESULTS`. Seconds-long manifests only (`smoke-tiny-v1`); others belong in `slurm/baseline.sbatch` |
+| `baseline-local EXP=…` | M1's reference run of the coe-hpc1-built binary for a manifest, writing to `$AFAR_RESULTS/reference/`. Seconds-long manifests only (`smoke-tiny-v1`) |
+| `evaluate-selftest` | build and run variants of the seed through the real evaluator, covering every contract status (a few minutes; Spack gcc 12 on coe-hpc1) |
 | `llm-fetch` | download the pinned model and unpack the vLLM container into `$AFAR_ASSETS` (`LLM_PARTS=sandbox` or `model`; needs internet) |
 | `env-record` | rewrite `env/modules.lock.txt` and `env/versions.txt` |
 | `lock` | re-resolve `env/*-requirements.in` into the `.txt` locks (needs internet) |
@@ -181,6 +182,7 @@ env/
 slurm/                          batch jobs (submit from the repo root on g17)
   baseline.sbatch               LRU baselines for experiment manifests on a CPU node (M1)
   toolchain_test.sbatch         can the node compiler build ChampSim, and what a candidate build costs (M2)
+  evaluate.sbatch               evaluate candidates, built-ins or the LRU baseline with the real evaluator (M2)
   check.sbatch, discover_gpu.sbatch   environment checks on a CPU node / an A100 node
   build_sif.sbatch              pack the vLLM container into a .sif on a cpuqs node
   llm_serve.sh                  sourced by GPU jobs: start, health-check and stop the vLLM sidecar
@@ -197,6 +199,11 @@ evaluator/                      candidate evaluation (a Python package; standard
   manifest.py, results.py       experiment manifests and result records (contract §2, §3)
   run_baseline.py, proc.py      LRU baseline runner; subprocesses killed as a whole group on timeout
   champsim_build.py             build and run ChampSim in a private copy of its source tree
+  prebuilt.py                   the prebuilt base tree each candidate build starts from
+  static_checks.py, fitness.py  EVOLVE-BLOCK rules and forbidden calls; named, versioned fitness functions
+  policies/                     evaluator policies: compile_only (R7) and champsim_ipc (real fitness)
+  evaluate_candidate.py         command line: one candidate x one manifest -> records + summary.json
+  openevolve_champsim.py        OpenEvolve's evaluate() for champsim_ipc
   toolchain_test.py             the measurements behind the candidate build strategy
 scripts/                        llm_fetch.sh, llm_ping.py, fake_llm_server.py, oe_check_config.py, oe_run_summary.py
 examples/function_minimization/ OpenEvolve's own example (v0.4.0), used to test OpenEvolve itself

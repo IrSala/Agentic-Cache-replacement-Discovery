@@ -1,5 +1,5 @@
-"""R7: OpenEvolve evaluator stub for ChampSim replacement candidates. It runs
-static checks and a compile-only check; no build, no simulation (Phase 3).
+"""R7: OpenEvolve's evaluator for the compile_only policy (evaluator/policies/compile_only.py):
+static checks and a compile-only check; no build, no simulation.
 
 OpenEvolve imports this file and calls evaluate(program_path) with a temporary
 copy of the candidate header (openevolve/evaluator.py). Statuses and scores
@@ -21,10 +21,7 @@ The compiler is $AFAR_CXX (default: g++ on PATH). Self-test, no GPU or LLM:
 """
 
 import argparse
-import functools
 import os
-import shutil
-import subprocess
 import sys
 import tempfile
 import time
@@ -37,140 +34,20 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from evaluator.proc import run_killable  # noqa: E402
 
-CHAMPSIM = ROOT / "external" / "ChampSim"
-SEED = ROOT / "seeds" / "evolved_repl.h"
+from evaluator.policies import Candidate, Context, InfraError  # noqa: E402,F401
+from evaluator.policies.compile_only import (MAX_SOURCE_BYTES, SEED, CompileOnly,  # noqa: E402
+                                             compiler_version)
+from evaluator.static_checks import END  # noqa: E402
 
-MAX_SOURCE_BYTES = 32 * 1024  # the contract's limits.max_source_bytes; a manifest sets it from Phase 3
-COMPILE_TIMEOUT_S = 60        # below evaluator.timeout in the OpenEvolve config, so this kill comes first
-OUTPUT_TAIL_CHARS = 4096
-START, END = "// EVOLVE-BLOCK-START", "// EVOLVE-BLOCK-END"
-CLASS_HEAD = "class evolved_repl : public champsim::modules::replacement"
-
-# Compiled next to the candidate. ChampSim calls a hook only if these traits
-# detect it (inc/cache.h:447-494); otherwise it silently uses a default, so a
-# hook with the wrong signature would build and run but never be called. The
-# variants are exactly the ones cache.h accepts.
-CHECK_CC = """\
-#include "evolved_repl.h"
-
-#include <type_traits>
-
-namespace afar_check
-{
-using R = champsim::modules::replacement;
-using T = evolved_repl&;
-using champsim::address;
-using access_int = std::underlying_type_t<access_type>;
-using block = const champsim::cache_block*;
-
-constexpr bool finds_victim = R::has_find_victim<T, uint32_t, uint64_t, long, block, address, address, access_type>
-                              || R::has_find_victim<T, uint32_t, uint64_t, long, block, address, address, access_int>
-                              || R::has_find_victim<T, uint32_t, uint64_t, long, block, uint64_t, uint64_t, access_int>;
-
-constexpr bool updates_state = R::has_update_state<T, uint32_t, long, long, address, address, access_type, bool>
-                               || R::has_update_state<T, uint32_t, long, long, address, address, address, access_type, bool>
-                               || R::has_update_state<T, uint32_t, long, long, address, address, address, access_int, bool>
-                               || R::has_update_state<T, uint32_t, long, long, uint64_t, uint64_t, uint64_t, access_int, bool>;
-} // namespace afar_check
-
-static_assert(std::is_constructible_v<evolved_repl, CACHE*>, "evolved_repl needs a constructor taking CACHE*");
-static_assert(afar_check::finds_victim, "find_victim is missing or has a signature ChampSim never calls; use the seed's signature");
-static_assert(afar_check::updates_state, "update_replacement_state is missing or has a signature ChampSim never calls; use the seed's signature");
-"""
-
-
-class InfraError(RuntimeError):
-    """The environment is broken; not the candidate's fault (contract: infra_error)."""
-
-
-def split_block(text):
-    """Return (before, block, after) as line lists, split at the marker lines, or None."""
-    if text.count("EVOLVE-BLOCK-START") != 1 or text.count("EVOLVE-BLOCK-END") != 1:
-        return None
-    lines = text.splitlines()
-    starts = [i for i, line in enumerate(lines) if line.strip() == START]
-    ends = [i for i, line in enumerate(lines) if line.strip() == END]
-    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
-        return None
-    s, e = starts[0], ends[0]
-    return lines[: s + 1], lines[s + 1 : e], lines[e:]
-
-
-def fixed_text(lines):
-    """The fixed text as compared: trailing whitespace on each line and at the end ignored."""
-    return "\n".join(line.rstrip() for line in lines).rstrip()
-
-
-def static_problem(code, seed):
-    """None if the candidate passes the static checks; otherwise the reason."""
-    if len(code.encode()) > MAX_SOURCE_BYTES:
-        return f"file is {len(code.encode())} bytes; the limit is {MAX_SOURCE_BYTES}"
-    parts = split_block(code)
-    if parts is None:
-        return f"needs exactly one '{START}' line followed by one '{END}' line"
-    before, _, after = parts
-    seed_before, _, seed_after = split_block(seed)
-    if fixed_text(before) != fixed_text(seed_before):
-        return "text before the EVOLVE-BLOCK differs from the seed; only the block may change"
-    if fixed_text(after) != fixed_text(seed_after):
-        return "text after the EVOLVE-BLOCK differs from the seed; only the block may change"
-    if CLASS_HEAD not in code:
-        return f"'{CLASS_HEAD}' is missing"
-    return None
-
-
-@functools.lru_cache(maxsize=None)
-def compiler_version(cxx):
-    out = subprocess.run([cxx, "--version"], capture_output=True, text=True, timeout=30).stdout
-    return out.splitlines()[0] if out else "unknown"
-
-
-def check_infra(cxx):
-    """Return the seed text, or raise InfraError if the environment can't evaluate."""
-    if shutil.which(cxx) is None:
-        raise InfraError(f"compiler {cxx!r} not found (set AFAR_CXX)")
-    needed = [SEED, CHAMPSIM / ".csconfig" / "module_decl.inc"]
-    needed += [CHAMPSIM / name for name in ("global.options", "absolute.options", "module.options")]
-    missing = [str(p) for p in needed if not p.exists()]
-    if missing:
-        raise InfraError(f"missing {', '.join(missing)}; run `make champsim` on coe-hpc1")
-    return SEED.read_text()
-
-
-def result(status, cxx, reason="", output="", seconds=0.0):
-    ok = status == "completed"
-    metrics = {"combined_score": 1.0 if ok else 0.0, "compiles": 1.0 if ok else 0.0,
-               "compile_seconds": round(seconds, 2)}
-    artifacts = {"status": status, "compiler": compiler_version(cxx)}
-    if reason:
-        artifacts["reason"] = reason
-    if output.strip():
-        artifacts["compiler_output"] = output[-OUTPUT_TAIL_CHARS:]
-    return EvaluationResult(metrics=metrics, artifacts=artifacts)
+_POLICY = CompileOnly()
 
 
 def evaluate(program_path):
-    """OpenEvolve's entry point."""
-    cxx = os.environ.get("AFAR_CXX", "g++")
-    seed = check_infra(cxx)
+    """OpenEvolve's entry point: the compile_only policy, as an EvaluationResult."""
     code = Path(program_path).read_text(errors="replace")
-
-    problem = static_problem(code, seed)
-    if problem:
-        return result("invalid_candidate", cxx, reason=problem)
-
-    cmd = [cxx, f"@{CHAMPSIM}/global.options", f"@{CHAMPSIM}/absolute.options", f"@{CHAMPSIM}/module.options",
-           f"-I{CHAMPSIM}/.csconfig", "-fsyntax-only", "-fdiagnostics-color=never", "-fmax-errors=10", "check.cc"]
-    with tempfile.TemporaryDirectory(prefix="afar-compile-") as work:
-        Path(work, "evolved_repl.h").write_text(code)
-        Path(work, "check.cc").write_text(CHECK_CC)
-        code_or_none, output, seconds = run_killable(cmd, work, COMPILE_TIMEOUT_S)
-    if code_or_none is None:
-        return result("timeout", cxx, reason=f"the compiler was still running after {COMPILE_TIMEOUT_S}s and was killed",
-                      output=output, seconds=seconds)
-    if code_or_none != 0:
-        return result("compile_failed", cxx, reason="the compiler reported errors", output=output, seconds=seconds)
-    return result("completed", cxx, output=output, seconds=seconds)
+    candidate = Candidate(candidate_id="openevolve", sha256="0" * 64, code=code)
+    outcome = _POLICY.evaluate(candidate, Context(cxx=os.environ.get("AFAR_CXX", "g++")))
+    return EvaluationResult(metrics=outcome.metrics, artifacts=outcome.artifacts)
 
 
 def selftest():
