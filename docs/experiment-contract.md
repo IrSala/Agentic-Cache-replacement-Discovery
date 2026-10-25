@@ -41,9 +41,17 @@ There is one hand-written JSON file per experiment, `configs/experiments/<experi
 | `limits` | `build_timeout_s`, `run_timeout_s`, `max_source_bytes` |
 | `fitness` | `name: "geomean_ipc_speedup"`, `version` |
 
-**Trace set for now:** `602.gcc_s-1850B` at 1M warmup / 5M simulated instructions, for **plumbing only**. On this trace the LLC hit rate is about 0.3%, and LRU, SRRIP, DRRIP and SHIP land within 0.2% IPC of each other, so fitness is flat.
+**Smoke trace:** `602.gcc_s-1850B` at 1M warmup / 5M simulated instructions (`smoke-v1`), for **plumbing only**. On this trace the LLC hit rate is about 0.3%, and LRU, SRRIP, DRRIP and SHIP land within 0.2% IPC of each other, so fitness is flat.
 
-**Phase 2:** calibrate a set of LLC-sensitive traces (SPEC2017 DPC-3). A trace is admitted only if the built-in policies differ by at least 1% IPC on it.
+**Research trace set (M3, `docs/trace-calibration.md`):** the 19 CRC-2 SPEC CPU2006 SimPoints that ArchAgent used, pinned in `configs/traces/crc2-archagent19.json`. A trace is admitted only if both hold at the 50M + 200M reference length:
+- LRU's demand MPKI is above 1
+- the built-in policies' IPCs differ by at least 1%
+
+Calibration then picks the shortest run length that ranks the built-in policies like the reference does. It writes two manifests:
+- `crc2-evolve-v1`, for evolution
+- `crc2-validate-v1`, at the reference length
+
+Records of a single-trace array task (`evaluate_candidate --trace`) carry the full manifest's sha256.
 
 ## 3. Result schema
 

@@ -117,6 +117,16 @@ class Manifest:
     def trace_path(self, trace):
         return assets_dir() / trace["path"]
 
+    def restricted(self, trace_id):
+        """This manifest with only one trace, for one array task. Path and sha256
+        stay the full file's, so its records still name the manifest they came from."""
+        traces = [t for t in self.data["traces"] if t["id"] == trace_id]
+        if not traces:
+            raise ValueError(f"{self.path}: no trace {trace_id!r}")
+        view = copy.copy(self)
+        view.data = dict(self.data, traces=traces)
+        return view
+
     def check_traces(self, verify_hashes=False):
         """Return problems with the traces on disk (missing, or a sha256 mismatch)."""
         found = []
@@ -156,9 +166,26 @@ def selftest():
     with tempfile.TemporaryDirectory() as work:
         path = Path(work, "m.json")
         path.write_text(json.dumps(good))
-        ok = Manifest(path).sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
+        whole = Manifest(path)
+        ok = whole.sha256 == hashlib.sha256(path.read_bytes()).hexdigest()
         failures += not ok
         print(f"  {'ok  ' if ok else 'FAIL'}  {'sha256 of the file bytes':<26}")
+
+        # A one-trace view keeps the file's sha256 and leaves the original whole.
+        two = copy.deepcopy(good)
+        two["traces"].append(dict(two["traces"][0], id="second"))
+        path.write_text(json.dumps(two))
+        whole = Manifest(path)
+        one = whole.restricted("second")
+        ok = ([t["id"] for t in one["traces"]] == ["second"] and one.sha256 == whole.sha256
+              and len(whole["traces"]) == 2)
+        try:
+            whole.restricted("missing")
+            ok = False
+        except ValueError:
+            pass
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'}  {'restricted to one trace':<26}")
 
     print("manifest selftest passed" if failures == 0 else f"manifest selftest FAILED: {failures} case(s)")
     return 1 if failures else 0

@@ -18,6 +18,8 @@ logs/*
 *.champsimtrace
 *.champsimtrace.xz
 *.champsimtrace.gz
+*.trace.xz
+*.trace.gz
 
 # Slurm output
 slurm-*.out

@@ -1,12 +1,12 @@
 # Project status
 
-As of 2026-10-23. What works, how it was verified, what was measured, and what's next. Update this page at the end of each milestone. The plan going forward is in `docs/roadmap.md`.
+As of 2026-10-25. What works, how it was verified, what was measured, and what's next. Update this page at the end of each milestone. The plan going forward is in `docs/roadmap.md`.
 
 ## Summary
 
 - **Phase 1 is complete.** A fresh clone of the GitHub repo builds on coe-hpc1 with one `make setup`, and runs on COE-HPC3 with no modules. A GPU job serves a pinned 7B model with vLLM next to OpenEvolve, and OpenEvolve evolves the real target: a ChampSim LLC replacement policy in one C++ header.
 - **Candidates can now be scored for real (M2).** `evaluator/evaluate_candidate.py` (the `champsim_ipc` policy) builds a candidate into ChampSim on an HPC3 node, runs the manifest's traces, and scores IPC against LRU. The seed scores exactly 1.0. OpenEvolve runs still use the compile-only policy until M4 switches them over.
-- In BUILD_PLAN's terms, phases 0–3 are done, and phase 4 is started (table below). Roadmap milestones M0–M2 are done; M3 (trace calibration) is next.
+- In BUILD_PLAN's terms, phases 0–3 are done, and phase 4 is started (table below). Roadmap milestones M0–M2 are done; M3 (trace calibration) is in progress.
 
 ## Where each BUILD_PLAN phase stands
 
@@ -63,6 +63,8 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | Host memory (`sacct` MaxRSS) | 3.1–4.2 GB; jobs request 24G | R5–R7 |
 | Largest prompt | 7,204 tokens (toy), 4,003 (C++) | R6, G |
 | ChampSim speed, baseline binary | **about 55,000 instructions/s** on `c11` and `c18` (Xeon E5-2660 v4, 2.0 GHz): 6M instructions in 106–109 s. A local trace copy is no faster, so the CPU is the limit, not NFS. At this speed, 50M warmup + 200M simulated instructions would take about 75 min per trace, so simulation length and trace count are the main cost levers for M3–M5 | M1, M2 part A |
+| ChampSim cost per run, by IPC | about 3.1 µs per instruction plus 4.5 µs per simulated cycle (E5-2660 v4): `mcf_46B` (IPC 0.13) 26K instructions/s, `calculix_2670B` (IPC 2.9) 217K/s. Peak RSS about 117 MB | M3 (`docs/trace-calibration.md`) |
+| CRC-2 traces on `/data` | 19 traces, 5.39 GB, 1B instructions each; the folder zip (28 GB) took 37 min and was deleted | M3 |
 | Candidate build on an HPC3 node (gcc 11.5, `-j4`) | full build 53.3 s; after copying a built tree, 10.5 s (2 objects recompiled) | M2 part A |
 
 ## Decisions and why
@@ -93,7 +95,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | 8 | pip's cache isn't redirected | `~/.cache/pip` is 3 GB on the 99%-full `/home` (mostly older than this repo) | The Makefile runs pip with `--no-cache-dir`. The existing 3 GB is the user's to delete | **Fixed in M1** |
 | 9 | `cs002` GPU 0 is faulty (73 uncorrectable ECC errors) | Jobs exclude `cs002` and lose its 3 healthy GPUs | Report to HPC support (a note is drafted) | The user's call |
 | 10 | Two near-identical OpenEvolve job scripts | Changes have to be made twice | A shared helper once a third script appears | Deferred |
-| 11 | Cycle counts on `smoke-v1` move in 12,000-cycle steps; DRRIP's LLC behaviour differs from LRU's, yet its cycle count is identical (job 94248) | Fitness resolution of about 0.064% on this trace, so small policy differences can read as exactly 1.0 | Check in M3 on LLC-sensitive traces and longer runs: does the step persist, and does DRRIP then differ? If it does, find its cause (DRAM timing, for example) before trusting small fitness differences | Open; for M3 |
+| 11 | Cycle counts on `smoke-v1` move in 12,000-cycle steps; DRRIP's LLC behaviour differs from LRU's, yet its cycle count is identical (job 94248) | Fitness resolution of about 0.064% on this trace, so small policy differences can read as exactly 1.0 | Check in M3 on LLC-sensitive traces and longer runs: does the step persist, and does DRRIP then differ? If it does, find its cause before trusting small fitness differences. Ruled out so far: warmup (361,901 cycles for every policy) and DRAM refresh (tREF = 32 ms / 8192 = 15,625 core cycles at 4 GHz, not 12,000) | Open; M3 measures it on 19 traces × 3 lengths |
 
 ## Next steps
 
@@ -104,6 +106,6 @@ The plan to an autonomous, multi-node research system is in **`docs/roadmap.md`*
 | **M0** HPC3 capability check | **Done (2026-10-23).** Jobs can submit jobs; `scrontab` is disabled, so the watchdog uses `afternotok` handlers plus a `--begin` heartbeat; `MaxArraySize` is 1001; `JobRequeue=1`; `/bin/mail` is available |
 | **M1** Baseline in Slurm, result schema, manifest v1, and issues 1, 7 and 8 | **Done (2026-10-23).** Job 94177 reproduced 43,703 cycles on HPC3 and wrote validated `smoke-v1` baselines. Issues 1, 7 and 8 are fixed |
 | **M2** Real evaluator (resolves issues 2, 3 and 5) | **Done (2026-10-23).** Part A: job 94191. Part B (job 94248): the `champsim_ipc` evaluator with a prebuilt base tree. The self-test passes 10/10 on HPC3; on `smoke-v1` the seed's fitness is exactly 1.0, SRRIP 0.99936, SHiP 1.00129, and DRRIP 1.0 (its LLC behaviour differs, but its cycle count is identical). Cycle counts move in 12,000-cycle steps on this trace; that's to check in M3 |
-| **M3** Trace calibration (issue 6) | **Next.** Also check issue 11 (12,000-cycle steps; DRRIP the same as LRU) on the calibrated traces |
+| **M3** Trace calibration (issue 6) | **In progress.** The 19 CRC-2 traces ArchAgent used, calibrated at 10M+10M, 20M+50M and 50M+200M with the four built-in policies, as Slurm arrays (`docs/trace-calibration.md`). Also checks issue 11 (12,000-cycle steps; DRRIP the same as LRU) |
 | M4 Single-job prototype with real fitness | Planned |
 | M5 Staged generations (issue 10) · M6 Long-run hardening · M7 Comparing levers | Planned |

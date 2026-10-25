@@ -2,10 +2,11 @@
 
 A reproducible OpenEvolve + ChampSim environment for SJSU CoE HPC. It is the foundation for evolving ChampSim cache-replacement policies with OpenEvolve, staged across GPU (generation) and CPU (evaluation) Slurm jobs.
 
-**Status:** Phase 1 is complete; see [docs/status.md](docs/status.md) for what works and the evidence, and [docs/roadmap.md](docs/roadmap.md) for the plan to an autonomous, multi-node research system.
+**Status:** M2 of [docs/roadmap.md](docs/roadmap.md) is complete and M3 (trace calibration) is in progress; see [docs/status.md](docs/status.md) for what works and the evidence.
 - A fresh clone builds on coe-hpc1 with `make setup` and runs on COE-HPC3 with no modules.
 - One GPU job serves a pinned 7B model with vLLM next to OpenEvolve, which evolves a ChampSim LLC replacement policy.
-- Candidates are compiled but not yet simulated. That's the next phase, following [docs/experiment-contract.md](docs/experiment-contract.md).
+- The real evaluator builds each candidate into ChampSim, simulates the manifest's traces and scores IPC against LRU ([docs/experiment-contract.md](docs/experiment-contract.md)).
+- M3 calibrates the 19 CRC-2 traces ArchAgent used, as Slurm arrays ([docs/trace-calibration.md](docs/trace-calibration.md)).
 
 ## Two clusters, one workflow
 
@@ -154,10 +155,11 @@ sbatch --exclude=cs002 slurm/openevolve_champsim_compile.sbatch
 | `oe-toy-manual` | run OpenEvolve's toy example with no LLM (`llm.manual_mode`). Each prompt appears as `$(OUT)/manual_tasks_queue/<id>.json`; answer it by writing `<id>.answer.json` containing `{"answer": "<SEARCH/REPLACE diff>"}`. Options: `OUT=`, `CHECKPOINT=<dir>` to resume, `ITERATIONS=` (counted from the checkpoint) |
 | `oe-summary RUN=…` | one row per iteration of an OpenEvolve run: outcome or evaluator status, score, LLM and evaluation seconds, tokens |
 | `oe-compile-selftest` | check the compile-only evaluator on variants of the seed, covering every status and the timeout kill (after `make champsim`) |
-| `evaluator-selftest` | self-test the result-record and manifest modules (`evaluator/results.py`, `evaluator/manifest.py`) |
+| `evaluator-selftest` | self-test result records, manifests, static checks, fitness functions and the calibration rules (seconds) |
 | `baseline-local EXP=…` | M1's reference run of the coe-hpc1-built binary for a manifest, writing to `$AFAR_RESULTS/reference/`. Seconds-long manifests only (`smoke-tiny-v1`) |
 | `evaluate-selftest` | build and run variants of the seed through the real evaluator, covering every contract status (a few minutes; Spack gcc 12 on coe-hpc1) |
 | `llm-fetch` | download the pinned model and unpack the vLLM container into `$AFAR_ASSETS` (`LLM_PARTS=sandbox` or `model`; needs internet) |
+| `traces-fetch` | download the CRC-2 folder zip (28 GB) to `$AFAR_ASSETS/traces/crc2/`, extract the 19 traces ArchAgent used, pin them in `configs/traces/crc2-archagent19.json` and delete the zip (needs internet) |
 | `env-record` | rewrite `env/modules.lock.txt` and `env/versions.txt` |
 | `lock` | re-resolve `env/*-requirements.in` into the `.txt` locks (needs internet) |
 | `clean` / `distclean` | remove build outputs / also `.python/`, the venvs and `vcpkg_installed/` |
@@ -183,6 +185,7 @@ slurm/                          batch jobs (submit from the repo root on g17)
   baseline.sbatch               LRU baselines for experiment manifests on a CPU node (M1)
   toolchain_test.sbatch         can the node compiler build ChampSim, and what a candidate build costs (M2)
   evaluate.sbatch               evaluate candidates, built-ins or the LRU baseline with the real evaluator (M2)
+  calibrate_array.sbatch        a Slurm array: one (target, trace) pair of a manifest per task, on 1 CPU (M3)
   check.sbatch, discover_gpu.sbatch   environment checks on a CPU node / an A100 node
   build_sif.sbatch              pack the vLLM container into a .sif on a cpuqs node
   llm_serve.sh                  sourced by GPU jobs: start, health-check and stop the vLLM sidecar
@@ -192,7 +195,8 @@ slurm/                          batch jobs (submit from the repo root on g17)
 configs/champsim/baseline.json  ChampSim configuration for baseline builds
 configs/llm/serve.env           pinned vLLM image and model (names, digests, revisions)
 configs/openevolve/             OpenEvolve configs: toy.yaml, toy-manual.yaml, champsim-compile.yaml
-configs/experiments/           experiment manifests (contract §2): smoke-tiny-v1.json, smoke-v1.json
+configs/experiments/           experiment manifests (contract §2): smoke-*, crc2-tiny-v1, crc2-cal-{L1,L2,ref}-v1
+configs/traces/                 pinned trace sets: crc2-archagent19.json (sha256, size, instructions) and the CRC-2 zip's member list
 seeds/evolved_repl.h            the seed candidate: a header-only port of ChampSim's LRU
 evaluator/                      candidate evaluation (a Python package; standard library only, except compile_check.py)
   compile_check.py              OpenEvolve evaluator for candidates (compile-only stub)
@@ -205,7 +209,8 @@ evaluator/                      candidate evaluation (a Python package; standard
   evaluate_candidate.py         command line: one candidate x one manifest -> records + summary.json
   openevolve_champsim.py        OpenEvolve's evaluate() for champsim_ipc
   toolchain_test.py             the measurements behind the candidate build strategy
-scripts/                        llm_fetch.sh, llm_ping.py, fake_llm_server.py, oe_check_config.py, oe_run_summary.py
+  calibrate.py                  M3: write the calibration manifests, then apply the pre-set admission and length rules
+scripts/                        llm_fetch.sh, traces_fetch_crc2.py, llm_ping.py, fake_llm_server.py, oe_check_config.py, oe_run_summary.py
 examples/function_minimization/ OpenEvolve's own example (v0.4.0), used to test OpenEvolve itself
 docs/status.md                  what works, the evidence, open issues and next steps
 docs/roadmap.md                 the plan to an autonomous, multi-node research system (M0–M7)
@@ -213,6 +218,7 @@ docs/sjsu-hpc-workflow.md       how to develop on SJSU HPC (for new users and co
 docs/llm-serving.md             LLM serving on HPC3: GPU facts, pinned assets, R5–R6 results
 docs/champsim-evaluator.md      how candidates are checked and compiled, and R7 results
 docs/experiment-contract.md     candidate format, manifest, result schema, fitness, failure policy (v0)
+docs/trace-calibration.md       M3: the CRC-2 trace suite, the calibration rules and their results
 external/ChampSim/              ChampSim submodule
 runs/                           OpenEvolve output, one directory per job (ignored by git)
 logs/                           Slurm job logs (contents ignored by git)
@@ -264,6 +270,7 @@ Measured after `make setup` (see `env/versions.txt`):
 | total for the environment | about 0.65 GB |
 | whole fresh clone, including git history and `build/` (2026-10-21) | 795 MB |
 | `$AFAR_ASSETS` on `/data`: model 14 GB + container 7.1 GB | about 21 GB, plus 21 GB of unpacked container while the `.sif` is built |
+| `$AFAR_ASSETS/traces/crc2/` (`make traces-fetch`) | 5.4 GB, plus the 28 GB folder zip while it's fetched |
 
 `--clean-after-build` already removes vcpkg's source downloads and build trees.
 
