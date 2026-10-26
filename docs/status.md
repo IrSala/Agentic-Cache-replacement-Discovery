@@ -11,7 +11,8 @@ As of 2026-10-26. What works, how it was verified, what was measured, and what's
 - **Evolution runs as a staged campaign (M5).** A GPU job writes a whole generation of 24 candidates in under 2 minutes. A CPU array evaluates them, and a small job adds the scores and starts the next generation (`docs/campaigns.md`).
   - On the dev set, 3 generations ran unattended in 27 minutes: 22 s per iteration against M4's 34 s, with the GPU held a fifth of the time.
   - A killed task was retried, a cancelled stage resumed, and a persistent failure halted with a clear message.
-- In BUILD_PLAN's terms, phases 0–6 are done (table below). Roadmap milestones M0–M5 are done; M6, hardening for long runs, is next.
+- In BUILD_PLAN's terms, phases 0–6 are done (table below). Roadmap milestones M0–M5 are done.
+- **M6, hardening for long runs, is in progress.** Its watchdog, mail on halt and stop conditions pass their checks on coe-hpc1 (part A, `docs/campaigns.md` §5–6). Mail delivery is tested (job 96270: through Slurm only). Next on HPC3: four short tests, then a 48-hour pilot.
 - **Runs are assembled from swappable parts (M4 part A).** A run spec, `configs/runs/<name>.yaml`, names the seed, model profile, prompt profile, search profile and evaluator policy, and one generic job, `slurm/openevolve.sbatch`, runs any spec (`docs/run-specs.md`).
 
 ## Where each BUILD_PLAN phase stands
@@ -24,7 +25,7 @@ As of 2026-10-26. What works, how it was verified, what was measured, and what's
 | 3. Standalone evaluator | **Done (M2)** | `evaluator/evaluate_candidate.py`: static checks, a build from the prebuilt base tree, runs under `prlimit`, ROI metrics, the contract's statuses and `geomean_ipc_speedup@1`. Self-test 10/10 on HPC3 (job 94248) |
 | 4. Persistent-controller prototype | **Done (M4)** | One GPU job runs vLLM plus OpenEvolve with real `champsim_ipc` fitness on the node's CPUs, assembled from a run spec, with resume across jobs and clean time-limit stops (jobs 95745, 95767–95769, 95821–95822) |
 | 5–6. CPU arrays, staged generations | **Done (M5)** | A campaign's GPU job generates a generation, a CPU array evaluates it, and an aggregation job updates OpenEvolve's database and submits the next stage. Stages are idempotent; failed tasks are retried, persistent failures halt, and stopped stages resume (`m5-dev-a`, `-b`, `-c`: jobs 95825–96182) |
-| 7–10. Campaign state, hardening, observability, islands | Next: M6 (phases 7–9), then M7 (phase 10) | |
+| 7–10. Campaign state, hardening, observability, islands | In progress: M6 (phases 7–9), then M7 (phase 10) | M6 part A on coe-hpc1: failure handlers, a heartbeat, mail on halt, stop conditions and a budget |
 
 The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got OpenEvolve working with a GPU-served LLM on this HPC. It covers BUILD_PLAN phases 1–2 and the early parts of 3–4.
 
@@ -39,7 +40,8 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | Serve the model inside a GPU job | `slurm/llm_serve.sh` (GPU preflight, random port and key, health wait, clean stop); tested by `slurm/llm_ping.sbatch` | `docs/llm-serving.md` |
 | Any OpenEvolve run, from a run spec, with resume | `make oe-check SPEC=<name>`, then `sbatch --export=ALL,SPEC=<name> slurm/openevolve.sbatch` (`RESUME=runs/<run>` to continue) | `docs/run-specs.md` |
 | OpenEvolve on a toy / on the ChampSim policy, compile-only | `SPEC=toy-v1` (R6) / `SPEC=champsim-compile-v1` (R7) | `docs/llm-serving.md`, `docs/champsim-evaluator.md` |
-| A staged campaign: a GPU job generates, CPU arrays evaluate, a small job aggregates | `make campaign-start SPEC=<name>` on g17; `make campaign-status`, `campaign-stop` or `campaign-resume C=<id>`; `make campaign-selftest` on coe-hpc1 | `docs/campaigns.md` |
+| A staged campaign: a GPU job generates, CPU arrays evaluate, a small job aggregates | `make campaign-start SPEC=<name>` on g17; `make campaign-status`, `campaign-stop` (`NOW=1`) or `campaign-resume C=<id>`; `make campaign-selftest` on coe-hpc1 | `docs/campaigns.md` |
+| A campaign's watchdog, mail on halt and limits (M6; verified on coe-hpc1 so far) | automatic; limits in the spec's `campaign:` section; `make mail-test` on g17 tests delivery | `docs/campaigns.md` §5–6 |
 | Evaluate a candidate for real: baseline, candidate file or built-in policy | `sbatch slurm/evaluate.sbatch` (or `python -m evaluator.evaluate_candidate`) | `docs/champsim-evaluator.md` (M2 part B) |
 | Test job scripts without a GPU | `AFAR_LLM_FAKE=1` or the `fake-v1` model profile (plus `AFAR_LLM_FAKE_REPLY=<file>` to replay a real reply) | `docs/llm-serving.md` |
 | Summarize a run | `make oe-summary RUN=runs/<name>-<jobid>` | |
@@ -48,6 +50,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 
 | Step | Job(s) | Result |
 |---|---|---|
+| M6: mail delivery (`make mail-test`) | 96270 (`homacs1`) | Slurm's own message (`--mail-type=END`) arrived. The node has no `/bin/mail`, `mailx` or `sendmail`, so it couldn't send its own. Campaigns therefore mail through Slurm: a 1-second job whose name is the subject |
 | M5 part B: `m5-dev-v1`, 3 generations × 24 candidates, unattended (`m5-dev-a`) | 95825–95890; generation jobs 95827, 95860 (`cs004`), 95887 (`cs001`) | Finished in 27 min with no intervention; every stage ran first time. Of the 72 iterations: 41 `completed`, 8 `compile_failed`, 3 `invalid_candidate`, 16 `runtime_failed`, and 4 rejected as identical to their parent. 4 duplicates shared an evaluation. Best `combined_score` 1.2011, found in generation 1 (M4's best: 1.1881) |
 | M5 part B: a killed task is retried, and a cancelled stage resumes (`m5-dev-b`) | 95915–96182: task 95981_19 and aggregation 96012 cancelled | **Retry:** task 19 of generation 2 was cancelled mid-run. Aggregation resubmitted only that task (job 96006, attempt 2), which completed on `c11`, and generation 3 followed. No node was excluded, since a cancelled task writes no infrastructure marker. A first try (task 95919_3) came too late: that candidate had already finished. **Resume:** generation 3's aggregation (96012) was cancelled while it waited for its array. `make campaign-resume` refused while the array (96011) still ran. Run again once the array was done, it submitted aggregation 96182, which added the generation's 22 programs and finished the campaign. The final checkpoint holds 50 programs (the population cap), iterations 0–72, none repeated. The campaign sat idle for about 3 h 45 min until the resume (issue 12) |
 | M5 part B: a persistent infrastructure failure halts (`m5-dev-c`, a `faults.json` failing generation 1's task 0 on every attempt) | 95944–96004 | Attempt 1 failed on `c20`. Aggregation resubmitted the task with `--exclude=c20`; it failed on `c2`. Then with `--exclude=c2,c20`; it failed on `c6`. The campaign then halted with `halted: infra` and the message "1 of 24 evaluation(s) of generation 1 failed 3 time(s): task 0 (376739fb594257a8): injected by faults.json (attempt 3) on c6", followed by the log directory. It halted 9 min after the start |
@@ -104,6 +107,8 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | A compile check that `static_assert`s ChampSim's hook detection | A hook with the wrong signature otherwise compiles and is silently never called | `docs/champsim-evaluator.md` |
 | ArchAgent's 19 CRC-2 traces, calibrated under pre-set rules | Comparable with published work; the rules were fixed before any result, so they couldn't be tuned to it | `docs/trace-calibration.md` |
 | Evolve at 20M + 50M, confirm at 50M + 200M | No short length met the ±0.5 pp rule. L2 ranks the policies correctly at a quarter of the reference's cost, so it's the rule's flagged fallback (chosen 2026-10-25 over testing 50M + 100M) | `docs/trace-calibration.md` §4 |
+| A failure handler per stage job, plus a heartbeat at most hourly per campaign | Handlers cover the failures seen so far; the heartbeat covers a handler that fails or never runs. Hourly is 60× slower than the strictest polling rule found (Cirrus), as often as NERSC's own hourly restarts, and costs about 6 CPU-minutes a day. SJSU publishes no rule on periodic jobs | `docs/campaigns.md` §5 |
+| Mail only on halts that need someone, sent through Slurm | A campaign retries most failures itself; per-job failure mail would mostly report problems already fixed. Compute nodes can't send mail (job 96270), so a halt submits a 1-second job whose name is the subject, and Slurm's controller mails at its end | `docs/campaigns.md` §5 |
 | `--mem=24G` for the GPU jobs | Measured peak is 4.2 GB; 64G left jobs waiting for memory while GPUs were free | `docs/llm-serving.md` |
 
 ## Open issues
@@ -121,7 +126,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | 9 | `cs002` GPU 0 is faulty (73 uncorrectable ECC errors) | Jobs exclude `cs002` and lose its 3 healthy GPUs | Report to HPC support (a note is drafted) | The user's call |
 | 10 | Two near-identical OpenEvolve job scripts | Changes have to be made twice | One generic job, `slurm/openevolve.sbatch SPEC=`; the two old scripts were wrappers until M5 removed them | **Fixed in M4 part A** |
 | 11 | Cycle counts on `smoke-v1` move in 12,000-cycle steps; DRRIP's LLC behaviour differs from LRU's, yet its cycle count is identical (job 94248) | Fitness resolution of about 0.064% on this trace, so small policy differences can read as exactly 1.0 | Check in M3 on LLC-sensitive traces and longer runs: does the step persist, and does DRRIP then differ? If it does, find its cause before trusting small fitness differences. Ruled out so far: warmup (361,901 cycles for every policy) and DRAM refresh (tREF = 32 ms / 8192 = 15,625 core cycles at 4 GHz, not 12,000) | **Closed in M3:** on all 14 admitted traces, policies' cycle counts differ at 1-cycle resolution and DRRIP differs from LRU. The quantum reappears only on near-flat `tonto_2834B` (−36,000 / +12,000 / −48,000), which is excluded. Its cause is still unknown |
-| 12 | Nothing notices a campaign stage that is cancelled, or dies before it runs | The campaign waits for `make campaign-resume`: about 3 h 45 min in the `m5-dev-b` test | M6's `afternotok` handlers and hourly heartbeat resubmit the stage | Planned for M6 |
+| 12 | Nothing notices a campaign stage that is cancelled, or dies before it runs | The campaign waits for `make campaign-resume`: about 3 h 45 min in the `m5-dev-b` test | M6's `afternotok` handlers and hourly heartbeat resubmit the stage | **Fix written in M6 part A;** verified on coe-hpc1, HPC3 test next |
 
 ## Next steps
 
@@ -159,5 +164,16 @@ The plan to an autonomous, multi-node research system is in **`docs/roadmap.md`*
   - Batching works: a generation's 24 replies take about as long as two single replies did in M4.
   - 16 of `m5-dev-a`'s 72 candidates crashed at run time; 15 of them on an out-of-range index or way.
 - **Moved to M6:** the first real `crc2-evolve-v1` campaign (decided 2026-10-26) |
-| **M6** Long-run hardening | **Next.** `afternotok` handlers and an hourly heartbeat (issue 12), mail on failure, stop conditions and a budget, then the first `crc2-evolve-v1` campaign |
+| **M6** Long-run hardening | **In progress.**
+- **Decided (2026-10-26):** mail only on halts that need you; a slim, hourly heartbeat, after checking SJSU's and other centers' guidance on periodic jobs; the 48-hour pilot is the first `crc2-evolve-v1` campaign, capped at 5,000 CPU-hours; no storage clean-up (a candidate's evaluation takes 177 KB).
+- **Part A, done on coe-hpc1:**
+  - failure handlers and a heartbeat (issue 12), where only the job `status.json` names may act
+  - `sbatch` retries
+  - mail on halt
+  - stop conditions and a budget (`docs/campaigns.md` §5–6)
+  - `make campaign-selftest` passes M5's checks and M6's, and the handler and heartbeat scripts ran against stand-ins for Slurm
+- **Mail delivery (job 96270):** only Slurm's message arrived, since compute nodes have no mail program; campaigns now mail through Slurm.
+- **Next on HPC3:**
+  - four short tests on `crc2-dev-v1`: a failed generation job restarted, a cancelled stage restarted by its handler and by the heartbeat, a persistent crash halting with mail, and `campaign-stop NOW=1`
+  - then the pilot |
 | M7 Comparing levers | Planned |

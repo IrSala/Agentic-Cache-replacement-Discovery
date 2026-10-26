@@ -60,8 +60,16 @@ SPEC_KEYS = {"spec_version": int, "description": str, "seed": str, "model": str,
 SPEC_OPTIONAL = {"language": str, "overrides": dict, "iterations": int, "campaign": dict}
 # A staged campaign (controller/campaign.py, M5): GPU jobs generate, CPU arrays evaluate.
 CAMPAIGN_KEYS = {"generations": int, "candidates_per_generation": int}
-CAMPAIGN_OPTIONAL = {"max_concurrent_tasks": int, "max_task_retries": int}
-CAMPAIGN_DEFAULTS = {"max_concurrent_tasks": 40, "max_task_retries": 2}
+NUMBER = (int, float)
+CAMPAIGN_OPTIONAL = {"max_concurrent_tasks": int, "max_task_retries": int,
+                     # M6: stop conditions, a budget and the watchdog (docs/campaigns.md)
+                     "max_wall_hours": NUMBER, "target_fitness": NUMBER, "max_cpu_hours": NUMBER,
+                     "max_gpu_hours": NUMBER, "max_failed_generations": int, "min_free_gb": NUMBER,
+                     "max_stage_retries": int, "heartbeat_minutes": int, "test": bool}
+CAMPAIGN_DEFAULTS = {"max_concurrent_tasks": 40, "max_task_retries": 2, "max_failed_generations": 3,
+                     "min_free_gb": 200, "max_stage_retries": 2, "heartbeat_minutes": 60, "test": False}
+# A campaign's heartbeat polls the scheduler, so it runs at most hourly; only a test campaign may go faster.
+HEARTBEAT_FLOOR_MINUTES = {False: 60, True: 10}
 NODE_CPUS = 56                         # HPC3's CPU nodes (docs/sjsu-hpc-workflow.md); a candidate's task fits one
 EVALUATOR_KEYS = {"policy": str, "experiment": str, "openevolve_file": str, "executor": str,
                   "parallel_candidates": int, "cpus_per_candidate": int, "timeout_s": int, "openevolve": dict}
@@ -132,8 +140,8 @@ def schema_problems(data, required, optional, where):
         if key not in data:
             if key in required:
                 found.append(f"{where}: missing {key}")
-        elif not isinstance(data[key], kind) or (kind is int and isinstance(data[key], bool)):
-            found.append(f"{where}: {key} must be {kind.__name__}")
+        elif not isinstance(data[key], kind) or (kind is not bool and isinstance(data[key], bool)):
+            found.append(f"{where}: {key} must be {getattr(kind, '__name__', 'a number')}")
     extra = set(data) - set(required) - set(optional)
     if extra:
         found.append(f"{where}: unknown key(s) {', '.join(sorted(extra))}")
@@ -202,6 +210,15 @@ def resolve(ref, *, cpus, api_base=None, template_dir="<run>/resolved/prompt"):
                 or campaign["max_task_retries"] < 0:
             problems.append("campaign: generations, candidates_per_generation and max_concurrent_tasks must be at "
                             "least 1, and max_task_retries at least 0")
+        if any(campaign.get(k, 1) <= 0 for k in ("max_wall_hours", "max_cpu_hours", "max_gpu_hours")) \
+                or campaign["min_free_gb"] < 0 or campaign["max_failed_generations"] < 1 \
+                or campaign["max_stage_retries"] < 0:
+            problems.append("campaign: max_wall_hours, max_cpu_hours and max_gpu_hours must be above 0, "
+                            "min_free_gb and max_stage_retries at least 0, and max_failed_generations at least 1")
+        floor = HEARTBEAT_FLOOR_MINUTES[campaign["test"]]
+        if campaign["heartbeat_minutes"] < floor:
+            problems.append(f"campaign: heartbeat_minutes {campaign['heartbeat_minutes']} is below {floor}"
+                            + ("" if campaign["test"] else " (only a spec with test: true may check more often)"))
         total = campaign["generations"] * campaign["candidates_per_generation"]
         if spec.get("iterations", total) != total:
             problems.append(f"spec: iterations {spec['iterations']} must equal generations x candidates_per_generation "
@@ -652,6 +669,19 @@ def selftest():
         case("campaign derives iterations", campaign_spec)
         case("campaign iterations mismatch", resolved(variant("cm", lambda d: d.update(campaign=camp))),
              "must equal generations x candidates_per_generation")
+        # M6: limits and the heartbeat's floor.
+        def campaign_limits():
+            r = resolve(variant("cl", lambda d: (d.pop("iterations"), d.update(campaign={
+                **camp, "max_cpu_hours": 5000, "target_fitness": 1.25, "test": True, "heartbeat_minutes": 10}))), cpus=4)
+            expect(r["campaign"]["max_cpu_hours"] == 5000 and r["campaign"]["max_stage_retries"] == 2
+                   and r["campaign"]["min_free_gb"] == 200, f"limits not kept: {r['campaign']}")
+        case("campaign limits and defaults", campaign_limits)
+        case("campaign heartbeat under the floor", resolved(variant("ch", lambda d: (d.pop("iterations"), d.update(
+            campaign={**camp, "heartbeat_minutes": 10})))), "heartbeat_minutes 10 is below 60")
+        case("campaign limit not a number", resolved(variant("cs", lambda d: (d.pop("iterations"), d.update(
+            campaign={**camp, "max_cpu_hours": "5000"})))), "max_cpu_hours must be a number")
+        case("campaign limit not positive", resolved(variant("cz", lambda d: (d.pop("iterations"), d.update(
+            campaign={**camp, "max_wall_hours": 0})))), "must be above 0")
         case("campaign task larger than a node", resolved(variant("cn", lambda d: (d.pop("iterations"), d.update(
             campaign=camp), d["evaluator"].update(cpus_per_candidate=64)))), "exceeds a CPU node's 56")
         case("campaign with an OpenEvolve file", resolved(variant("co", lambda d: (d.pop("iterations"), d.update(

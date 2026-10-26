@@ -27,10 +27,12 @@ PROFILE    ?= qwen2.5-coder-7b-v1
 EXP        ?=
 # make oe-check: one run spec (a name in configs/runs/); empty checks them all.
 SPEC       ?=
-# Staged campaigns (M5): C= is a campaign id or directory; EXCLUDE= keeps generation jobs off nodes.
+# Staged campaigns (M5): C= is a campaign id or directory; EXCLUDE= keeps generation jobs off nodes;
+# NOW=1 makes campaign-stop cancel the current stage's jobs and halt at once (M6).
 C          ?=
 NAME       ?=
 EXCLUDE    ?= cs002
+NOW        ?=
 
 CHAMPSIM_DIR    := external/ChampSim
 BASELINE_CONFIG := configs/champsim/baseline.json
@@ -61,7 +63,7 @@ CHAMPSIM_LDFLAGS := -static-libstdc++ -static-libgcc
 .PHONY: help setup submodules python venvs vcpkg champsim check check-runtime smoke \
         env-record lock clean distclean oe-check oe-check-config oe-toy-manual oe-summary oe-compile-selftest \
         evaluator-selftest evaluate-selftest baseline-local llm-fetch traces-fetch \
-        campaign-start campaign-status campaign-stop campaign-resume campaign-selftest
+        campaign-start campaign-status campaign-stop campaign-resume campaign-selftest mail-test
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -161,8 +163,8 @@ campaign-start: venvs ## Start a staged campaign from a run spec with a campaign
 campaign-status: venvs ## A campaign's state, generations and best fitness (C=<id>)
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.campaign status $(C)
 
-campaign-stop: venvs ## Halt a campaign after its current stage (C=<id>)
-	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.campaign stop $(C)
+campaign-stop: venvs ## Halt a campaign after its current stage (C=<id>; NOW=1 cancels its jobs and halts now, on g17)
+	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.campaign stop $(C) $(if $(NOW),--now)
 
 campaign-resume: venvs ## Resubmit a campaign's current stage, after a halt or a cancelled job (C=<id>; on g17)
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.campaign resume $(C)
@@ -170,6 +172,10 @@ campaign-resume: venvs ## Resubmit a campaign's current stage, after a halt or a
 campaign-selftest: venvs ## The staged pipeline end to end on this host: fake LLM, local executor, injected faults (~2 min)
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.oe_adapter --selftest
 	$(BUILD_ENV) $(RUN_ENV) AFAR_CXX=$$(command -v g++) $(VENV_DIR)/controller/bin/python -m controller.campaign --selftest
+
+mail-test: ## Test mail delivery to AFAR_MAIL_USER from a CPU node and from Slurm (M6; on g17)
+	@[ -n "$$AFAR_MAIL_USER" ] || { echo "set AFAR_MAIL_USER first: export AFAR_MAIL_USER=<you>@sjsu.edu" >&2; exit 2; }
+	sbatch --mail-type=END --mail-user="$$AFAR_MAIL_USER" slurm/mail_test.sbatch
 
 llm-fetch: venvs ## Download a model profile's weights and unpack the vLLM sandbox into AFAR_ASSETS (PROFILE=, LLM_PARTS=; needs internet)
 	$(BUILD_ENV) PROFILE=$(PROFILE) scripts/llm_fetch.sh $(LLM_PARTS)

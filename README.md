@@ -2,7 +2,7 @@
 
 A reproducible OpenEvolve + ChampSim environment for SJSU CoE HPC. It is the foundation for evolving ChampSim cache-replacement policies with OpenEvolve, staged across GPU (generation) and CPU (evaluation) Slurm jobs.
 
-**Status:** M0–M5 of [docs/roadmap.md](docs/roadmap.md) are complete, so evolution runs as staged campaigns across GPU and CPU nodes; M6 (hardening for long runs) is next. See [docs/status.md](docs/status.md) for what works and the evidence.
+**Status:** M0–M5 of [docs/roadmap.md](docs/roadmap.md) are complete, so evolution runs as staged campaigns across GPU and CPU nodes. M6 (hardening for long runs: a watchdog, mail on halt, stop conditions) is in progress. See [docs/status.md](docs/status.md) for what works and the evidence.
 - A fresh clone builds on coe-hpc1 with `make setup` and runs on COE-HPC3 with no modules.
 - One GPU job serves a pinned 7B model with vLLM next to OpenEvolve, which evolves a ChampSim LLC replacement policy.
 - The real evaluator builds each candidate into ChampSim, simulates the manifest's traces and scores IPC against LRU ([docs/experiment-contract.md](docs/experiment-contract.md)).
@@ -156,8 +156,9 @@ sbatch --exclude=cs002 --export=ALL,SPEC=champsim-compile-v1 slurm/openevolve.sb
 | `smoke TRACE=…` | 10K warmup + 10K simulated instructions, JSON output parsed |
 | `oe-check SPEC=…` | validate one run spec, or all of `configs/runs/`, with every part it names (the resolver's self-test first; no GPU) |
 | `campaign-start SPEC=…` | start a staged campaign (M5) from a run spec with a `campaign:` section; on g17 (`NAME=`, `EXCLUDE=`) |
-| `campaign-status C=…` / `campaign-stop C=…` / `campaign-resume C=…` | a campaign's state and generations / halt it after the current stage / resubmit its current stage |
-| `campaign-selftest` | the staged pipeline end to end on coe-hpc1: fake LLM, local executor, injected faults (~2 min) |
+| `campaign-status C=…` / `campaign-stop C=…` / `campaign-resume C=…` | a campaign's state, generations, heartbeat and use / halt it after the current stage (`NOW=1`: cancel its jobs and halt now) / resubmit its current stage |
+| `campaign-selftest` | the staged pipeline end to end on coe-hpc1: fake LLM, local executor, injected faults, the watchdog and stop conditions (~1.5 min) |
+| `mail-test` | on g17: test mail delivery to `$AFAR_MAIL_USER`, from a CPU node and from Slurm (M6) |
 | `oe-check-config` | load the hand-written `configs/openevolve/*.yaml` with OpenEvolve's loader; fail on unknown keys |
 | `oe-toy-manual` | run OpenEvolve's toy example with no LLM (`llm.manual_mode`). Each prompt appears as `$(OUT)/manual_tasks_queue/<id>.json`; answer it by writing `<id>.answer.json` containing `{"answer": "<SEARCH/REPLACE diff>"}`. Options: `OUT=`, `CHECKPOINT=<dir>` to resume, `ITERATIONS=` (counted from the checkpoint) |
 | `oe-summary RUN=…` | one row per iteration of an OpenEvolve run: outcome or evaluator status, score, LLM and evaluation seconds, tokens |
@@ -199,6 +200,8 @@ slurm/                          batch jobs (submit from the repo root on g17)
   llm_ping.sbatch               serve the model and check it through OpenEvolve's client
   openevolve.sbatch             one OpenEvolve run from a run spec (SPEC=), with resume (M4)
   campaign_generate.sbatch, campaign_evaluate.sbatch, campaign_aggregate.sbatch   a staged campaign's stages, submitted by the campaign itself (M5)
+  campaign_handle.sbatch, campaign_heartbeat.sbatch   its watchdog: a stage job's failure handler, and the hourly heartbeat (M6)
+  mail_test.sbatch              tests mail delivery from HPC3 (make mail-test)
 configs/champsim/baseline.json  ChampSim configuration for baseline builds
 configs/runs/                   run specs: one OpenEvolve run configuration each, naming the parts below (docs/run-specs.md)
 configs/models/                 model profiles: qwen2.5-coder-7b-v1.env, fake-v1.env
@@ -233,7 +236,7 @@ docs/champsim-evaluator.md      how candidates are checked and compiled, and R7 
 docs/experiment-contract.md     candidate format, manifest, result schema, fitness, failure policy (v0)
 docs/trace-calibration.md       M3: the CRC-2 trace suite, the calibration rules and their results
 docs/run-specs.md               M4: run specs, the swappable parts, and how to add one
-docs/campaigns.md               M5: staged campaigns (GPU generates, CPU arrays evaluate), their state and failure handling
+docs/campaigns.md               M5–M6: staged campaigns (GPU generates, CPU arrays evaluate), their state, failure handling, watchdog and limits
 external/ChampSim/              ChampSim submodule
 runs/                           OpenEvolve output, one directory per job (ignored by git)
 logs/                           Slurm job logs (contents ignored by git)

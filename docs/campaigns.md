@@ -1,4 +1,4 @@
-# Staged campaigns (M5)
+# Staged campaigns (M5, M6)
 
 A campaign runs evolution as a chain of short Slurm jobs instead of one long GPU job:
 - **Generation:** a GPU job writes a whole generation of candidates.
@@ -29,8 +29,11 @@ campaign:
 make oe-check SPEC=m5-dev-v1
 ```
 
-On g17, where jobs are submitted:
+On g17, where jobs are submitted, with your address in the environment so a halt can mail you (section 5):
 
+```bash
+export AFAR_MAIL_USER=<you>@sjsu.edu
+```
 ```bash
 make campaign-start SPEC=m5-dev-v1
 ```
@@ -49,13 +52,19 @@ To halt it after the current stage (this writes a `STOP` file):
 make campaign-stop C=<id>
 ```
 
+To halt it now, cancelling the current stage's jobs (on g17):
+
+```bash
+make campaign-stop C=<id> NOW=1
+```
+
 To resubmit the current stage after a halt or a cancelled job, on g17:
 
 ```bash
 make campaign-resume C=<id>
 ```
 
-**Testing on coe-hpc1.** `make campaign-selftest` runs the whole pipeline with the fake LLM, a local executor and injected faults, in about 2 minutes.
+**Testing on coe-hpc1.** `make campaign-selftest` runs the whole pipeline with the fake LLM, a local executor and injected faults, including the watchdog and every stop condition (section 7).
 
 ## 2. The stages
 
@@ -86,14 +95,16 @@ Each campaign lives in `$AFAR_RESULTS/campaigns/<id>/`, on `/data`, because `/ho
 | Path | Holds |
 |---|---|
 | `campaign.json` | the run record: the spec, its parts, every input's sha256, commits, executor, excluded nodes |
-| `status.json` | `state` (`running`, `finished` or `halted`), the generation, the stage, live job IDs, the attempt, and the reason for a halt |
-| `events.jsonl` | one line per submission, generation, retry, aggregation, halt or resume |
+| `status.json` | `state` (`running`, `finished` or `halted`), the generation, the stage, live job IDs, the attempt, and the reason for a halt or an early finish. Since M6 also `stage_job`, `handler_job` and `stage_attempt` (section 5) |
+| `events.jsonl` | one line per submission, generation, retry, aggregation, stage failure, stall, halt, mail or resume |
+| `heartbeat.json` | the heartbeat's last run, what it did, and its successor's job (M6) |
+| `budget.json` | CPU- and GPU-hours used so far, from `sacct`, updated each generation (M6) |
 | `resolved/` | the OpenEvolve config and the prompt snapshot |
 | `checkpoints/checkpoint_<iteration>/` | standard OpenEvolve checkpoints, one per generation. `openevolve-run --checkpoint` continues from them, so a campaign can be finished in single-job mode |
 | `generations/<g>/` | `candidates/<id>.h`; `generation.json` (parent, islands, prompt, reply, tokens or the rejection, per iteration); `tasks.json`; `results/<id>.json` and `<id>.infra-<attempt>.json`; `attempts.json`; `summary.json` |
 | `logs/` | every stage job's Slurm output |
 
-## 4. Failures (M5)
+## 4. Failures
 
 Every stage is idempotent, so running it twice is safe. That matters because Slurm requeues jobs after a node failure (`JobRequeue=1`), and a resume may repeat a stage:
 - **Atomic writes:** files are written to a temporary name, then renamed. A checkpoint becomes visible only when complete.
@@ -106,20 +117,84 @@ Every stage is idempotent, so running it twice is safe. That matters because Slu
 | A candidate is invalid, doesn't compile, crashes or times out | Scored 0 and recorded; the campaign goes on |
 | An evaluation task fails on infrastructure, is cancelled or is killed | `aggregate` resubmits just those tasks, up to `max_task_retries` times, with `--exclude=` the nodes named in their infrastructure markers. A task killed by `scancel` or a node failure writes no marker, so its retry may run on any node |
 | It still fails after that | The campaign halts with `halted: infra`. The message names each task, its last error and node, and the log directory |
-| A stage job is cancelled, crashes or never runs | `status.json` still points at that stage. `make campaign-resume` resubmits it. It refuses while the stage's jobs are still queued or running. Until M6, nothing notices such a stage, so the campaign waits for that resume |
-| `make campaign-stop` | The next stage boundary halts with `halted: stopped`; `resume` clears the `STOP` file and continues |
-
-**Coming in M6:** a failed stage restarting itself, through `afternotok` handlers and an hourly heartbeat job; mail; and stop conditions beyond the generation count.
+| A generation or aggregation job fails, times out or is cancelled | Its handler restarts it, up to `max_stage_retries` times; a generation job is kept off the node it failed on. Then the campaign halts with `halted: stage_failed` (section 5) |
+| A stage job and its handler both vanish, or a handler fails | The heartbeat restarts the stage within about an hour, or halts with `halted: stalled` |
+| A limit is reached | The campaign finishes or halts with the limit's reason (section 6) |
+| `make campaign-stop` | The next stage boundary halts with `halted: stopped`; `resume` clears the `STOP` file and continues. With `NOW=1`, it cancels the stage's jobs and halts at once |
+| Any other halt | `make campaign-resume` resubmits the current stage once the cause is fixed. It refuses while that stage's job is still queued or running; an evaluation array that is still running is kept |
 
 **Fault injection, for tests only.** A `faults.json` in the campaign directory, for example:
 
 ```json
-{"infra": [{"generation": 1, "index": 3, "attempts": [1]}], "aggregate_crash": [2]}
+{"infra": [{"generation": 1, "index": 3, "attempts": [1]}], "aggregate_crash": [2],
+ "generate_fail": [{"generation": 2, "attempts": [1]}]}
 ```
 
-That makes task 3 of generation 1 fail its first attempt, and makes the aggregation of generation 2 crash before saving. `"attempts": "all"` makes a failure persistent.
+That makes:
+- task 3 of generation 1 fail its first attempt
+- every aggregation of generation 2 crash before saving; `{"generation": 2, "attempts": [1]}` makes only the first crash
+- the first generation job of generation 2 exit 1 before it starts the model server
 
-## 5. Verified
+`"attempts": "all"` makes a failure persistent. For `infra`, attempts count a task's evaluations; for the others, a stage job's restarts (`stage_attempt`).
+
+## 5. The watchdog and mail (M6)
+
+**Failure handlers.** Every generation and aggregation job is submitted with a handler, `slurm/campaign_handle.sbatch`. The handler waits with `--dependency=afternotok:<job> --kill-on-invalid-dep=yes`:
+- if the job succeeds, Slurm removes the handler, unrun
+- if the job fails, times out, runs out of memory or loses its node, the handler runs. It reads how the job ended from `sacct` and logs a `stage_failed` event. Then it restarts the job (attempt 2, 3, …) or, past `max_stage_retries`, halts the campaign with `stage_failed`, naming the job, its Slurm state, exit code, node and log
+
+Evaluation arrays need no handler: their aggregation already waits with `afterany` and retries missing tasks.
+
+**The heartbeat** is a backstop for when recovery itself fails: a handler that fails or never runs, or anything else that leaves the campaign `running` with no live job (`docs/status.md`, issue 12). One heartbeat chain runs per campaign, `slurm/campaign_heartbeat.sbatch`, started by `campaign-start` and by `campaign-resume`. Each run:
+1. ends the chain if the campaign has finished or halted
+2. submits its successor first, `heartbeat_minutes` later, so a check that fails can't end the chain
+3. if neither the stage's job nor its handler is queued or running, and `status.json` hasn't changed for 10 min, restarts the stage, or halts with `stalled` past `max_stage_retries`
+
+It checks no limits; aggregation does that once per generation.
+
+**Shared-compute safeguards:**
+- **One at a time:** each campaign's heartbeats share one job name, `afar-heartbeat-<id>`, with `--dependency=singleton`, so Slurm never runs two at once. A heartbeat that finds another one already due ends without a successor.
+- **An interval floor:** `heartbeat_minutes` is at least 60 (10 only in a spec with `test: true`).
+- **Small footprint:** 1 CPU for about 15 s per run, about 24 jobs and 6 CPU-minutes a day, and one `squeue` an hour. Between runs, one pending job holds no resources.
+- **Easy removal:** `scancel --name=afar-heartbeat-<id>`.
+
+These follow the guidance found when M6 was planned: SJSU has no rule on periodic jobs; Cirrus sets a 60 s floor on scheduler polling; NERSC restarts its workflow processes hourly through `scrontab`, which HPC3 has disabled.
+
+**Only the named job acts.** `status.json` names the current stage's job (`stage_job`) and its handler (`handler_job`), and `heartbeat.json` the next heartbeat. Any other job exits without acting, after waiting up to 60 s in case its submitter hasn't recorded it yet. So a duplicate job does nothing: one left by an `sbatch` that timed out after Slurm took the job, or by a stage that crashed after submitting its successor. Every Slurm command is retried after 10, 30 and 60 s on errors a busy controller gives, such as a socket timeout. A rejected request is not retried.
+
+**Mail on halt.** HPC3's compute nodes can't send mail: in the delivery test (job 96270), `homacs1` had no mail program at all, but Slurm's own message arrived. So a halt has Slurm send it. The campaign submits a 1-second job named `AFAR_campaign_<id>_halted_<reason>` with `--mail-type=END`, and its end mails `$AFAR_MAIL_USER`. The mail arrives once that job has run, normally within a minute, later if `cpuqs` is full. Its subject reads `Slurm Job_id=<n> Name=AFAR_campaign_<id>_halted_<reason> Ended, …`. It has no body, so the details are in `make campaign-status C=<id>`.
+- **No mail for asked-for ends:** a halt you asked for (`stopped`) doesn't mail, and neither does a planned finish.
+- **The address** comes from the environment of the shell that ran `campaign-start` or `campaign-resume`, and jobs pass it on to the jobs they submit. Only `mail: true/false` is recorded.
+- **Mail can't block a halt:** a mail that fails becomes a `mail_failed` event and never stops the halt.
+- **Watchdog failures mail too:** handler and heartbeat jobs get Slurm's `--mail-type=FAIL`.
+
+To test delivery again (on g17, with `AFAR_MAIL_USER` set):
+
+```bash
+make mail-test
+```
+
+It tries both ways: `/bin/mail` from a CPU node, and Slurm's message when the job ends.
+
+## 6. Limits and stopping (M6)
+
+All are optional keys in the spec's `campaign:` section.
+
+| Key | Default | Outcome |
+|---|---|---|
+| `generations` | required | `finished` |
+| `target_fitness` | none | `finished` (`target`), once the best `combined_score` reaches it |
+| `max_wall_hours` | none | `finished` (`wall_time`), counted from the start |
+| `max_cpu_hours`, `max_gpu_hours` | none | `halted: budget` |
+| `max_failed_generations` | 3 | `halted: no_progress`, after that many generations in a row with no `completed` candidate |
+| `min_free_gb` | 200 | `halted: storage`, when the campaign's filesystem has less free |
+| `max_stage_retries` | 2 | `halted: stage_failed` or `stalled` (section 5) |
+| `heartbeat_minutes` | 60 | at least 60, or 10 with `test: true` |
+| `test` | false | allows test-only settings |
+
+Aggregation checks the limits after each generation, so one can be overshot by up to one generation. CPU- and GPU-hours come from `sacct` over every job in `events.jsonl`, array tasks included; heartbeats aren't counted. A budget halt can't be resumed, because the limits are part of the spec: to go further, start a new campaign from its last checkpoint.
+
+## 7. Verified
 
 **On coe-hpc1:** `make campaign-selftest` runs `controller.oe_adapter --selftest` and `controller.campaign --selftest`. The campaign uses `crc2-tiny-v1`, the fake LLM cycling through four replies, and the local executor. It checks that:
 - 3 generations finish
@@ -130,9 +205,24 @@ That makes task 3 of generation 1 fail its first attempt, and makes the aggregat
 - duplicates are evaluated once
 - `openevolve-run` continues from the last checkpoint
 
+M6 added these checks:
+- a generation job that fails once is restarted by its handler, off the node it failed on
+- an aggregation that crashes on every attempt is restarted twice, then halts with `stage_failed` and mails; the address appears in no campaign file
+- a halt's mail is a Slurm job with the right name, `--mail-type=END` and address, recorded as a `mailed` event
+- a persistent infrastructure failure mails; a `STOP` doesn't
+- a chain whose stage job and handler vanish is restarted by the heartbeat
+- heartbeats carry one name, `singleton`, an hourly `--begin` and FAIL mail; a heartbeat of an ended campaign, or one that finds another already due, submits no successor
+- through a stand-in `sbatch`: an `sbatch` that times out twice is retried and gives the right jobs; a rejected one isn't retried; the handler's and heartbeat's Slurm flags are right
+- each stop condition ends the campaign with its reason: target, wall time, budget (which can't be resumed), storage, no progress
+- `stop --now` halts at once, with no retry and no mail
+
+`controller.runspec --selftest` checks the new keys, including that a heartbeat under the floor is refused.
+
+**The M6 job scripts** ran on coe-hpc1 against a throwaway campaign, with stand-ins for `sbatch`, `squeue` and `sacct`. The heartbeat submitted its successor. The handler read a failed aggregation from `sacct`, then resubmitted it, with a new handler, as attempt 2.
+
 **The real stage scripts** ran one generation on coe-hpc1 with a stand-in `sbatch` that recorded each command.
 
-**On HPC3 (2026-10-26),** `m5-dev-v1` passed all four acceptance tests. Job IDs and full results are in `docs/status.md`.
+**On HPC3 (2026-10-26),** `m5-dev-v1` passed M5's four acceptance tests. Job IDs and full results are in `docs/status.md`.
 
 | Test | Campaign | What happened |
 |---|---|---|
