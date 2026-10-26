@@ -7,7 +7,7 @@ As of 2026-10-25. What works, how it was verified, what was measured, and what's
 - **Phase 1 is complete.** A fresh clone of the GitHub repo builds on coe-hpc1 with one `make setup`, and runs on COE-HPC3 with no modules. A GPU job serves a pinned 7B model with vLLM next to OpenEvolve, and OpenEvolve evolves the real target: a ChampSim LLC replacement policy in one C++ header.
 - **Candidates can now be scored for real (M2).** `evaluator/evaluate_candidate.py` (the `champsim_ipc` policy) builds a candidate into ChampSim on an HPC3 node, runs the manifest's traces, and scores IPC against LRU. The seed scores exactly 1.0. OpenEvolve runs still use the compile-only policy until M4 switches them over.
 - **A research trace set is calibrated (M3).** 14 of the 19 CRC-2 traces ArchAgent used separate the built-in policies. On them, the built-ins rank as in the literature (SHiP +5.95%, DRRIP +5.73%, SRRIP +5.15% over LRU at 50M + 200M). Evolution will score at 20M + 50M (`crc2-evolve-v1`) and confirm at 50M + 200M (`crc2-validate-v1`).
-- In BUILD_PLAN's terms, phases 0–3 are done, and phase 4 is started (table below). Roadmap milestones M0–M2 are done. M3 is done except for its two LRU-baseline arrays.
+- In BUILD_PLAN's terms, phases 0–3 are done, and phase 4 is started (table below). Roadmap milestones M0–M3 are done; M4 (OpenEvolve with real fitness) is next.
 
 ## Where each BUILD_PLAN phase stands
 
@@ -47,6 +47,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | R6: real model on the toy, then resume | 93362 (diff mode: 0/10 applied), 93369, 93386 | Full rewrites applied 9/10; resume continued at iteration 11 |
 | R7: real model on the ChampSim policy | 93458 (`cs004`) | 6 of 9 rewrites compiled; markers kept 9/9 |
 | G: fresh clone of GitHub `main` | setup on coe-hpc1; 93489 (`c19`), 93495 (`cs001`) | Everything reproduced, including smoke at 43,703 cycles; 5 of 10 rewrites compiled |
+| M3: LRU baselines of `crc2-evolve-v1` and `crc2-validate-v1` | 95426 (53 min), 95440 (4 h 12 min) | 28/28 reproduce the calibration's LRU cycles exactly; 27 of the 28 pairs ran on different nodes (17 nodes) |
 | M3: trace calibration, 228 runs | 95102 (L1, 15 min), 95199 (L2, 62 min), 95240 (ref, 3 h 53 min); 15 nodes incl. `homacs` | All `completed`, one toolchain, commit `205386c`. 14 of 19 traces admitted; L2 chosen (flagged); issue 11 closed (`docs/trace-calibration.md`) |
 | M2 part B: real evaluator | 94248 (`c11`) | Self-test 10/10 with gcc 11.5. On `smoke-v1`: seed 1.0 exactly, SRRIP 0.99936, SHiP 1.00129, DRRIP 1.0 (see issue 11) |
 | M2 part A: toolchain test | 94191 (`c18`) | gcc 11.5 builds and links; LRU, seed and SRRIP give 43,703 cycles; the gcc 11.5 build gives `smoke-v1`'s 18,624,235 cycles, the same as gcc 12 |
@@ -66,6 +67,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | Largest prompt | 7,204 tokens (toy), 4,003 (C++) | R6, G |
 | ChampSim speed, baseline binary | **about 55,000 instructions/s** on `c11` and `c18` (Xeon E5-2660 v4, 2.0 GHz): 6M instructions in 106–109 s. A local trace copy is no faster, so the CPU is the limit, not NFS. At this speed, 50M warmup + 200M simulated instructions would take about 75 min per trace, so simulation length and trace count are the main cost levers for M3–M5 | M1, M2 part A |
 | ChampSim cost per run, by IPC | about 3.1 µs per instruction plus 4.5 µs per simulated cycle (E5-2660 v4): `mcf_46B` (IPC 0.13) 26K instructions/s, `calculix_2670B` (IPC 2.9) 217K/s. Peak RSS about 117 MB | M3 (`docs/trace-calibration.md`) |
+| Node-to-node speed | The same mcf 50M + 200M run took 2.6–4.2 h depending on the node (`homacs3` fastest, `c1` slowest), with identical cycles | M3 |
 | One candidate on `crc2-evolve-v1` (14 traces) | 5.1 CPU-hours; 62 min on 14 CPUs, bound by `mcf_46B`. On `crc2-validate-v1`: 19.2 CPU-hours, 3.7 h | M3 |
 | CRC-2 traces on `/data` | 19 traces, 5.39 GB, 1B instructions each; the folder zip (28 GB) took 37 min and was deleted | M3 |
 | Candidate build on an HPC3 node (gcc 11.5, `-j4`) | full build 53.3 s; after copying a built tree, 10.5 s (2 objects recompiled) | M2 part A |
@@ -111,10 +113,10 @@ The plan to an autonomous, multi-node research system is in **`docs/roadmap.md`*
 | **M0** HPC3 capability check | **Done (2026-10-23).** Jobs can submit jobs; `scrontab` is disabled, so the watchdog uses `afternotok` handlers plus a `--begin` heartbeat; `MaxArraySize` is 1001; `JobRequeue=1`; `/bin/mail` is available |
 | **M1** Baseline in Slurm, result schema, manifest v1, and issues 1, 7 and 8 | **Done (2026-10-23).** Job 94177 reproduced 43,703 cycles on HPC3 and wrote validated `smoke-v1` baselines. Issues 1, 7 and 8 are fixed |
 | **M2** Real evaluator (resolves issues 2, 3 and 5) | **Done (2026-10-23).** Part A: job 94191. Part B (job 94248): the `champsim_ipc` evaluator with a prebuilt base tree. The self-test passes 10/10 on HPC3; on `smoke-v1` the seed's fitness is exactly 1.0, SRRIP 0.99936, SHiP 1.00129, and DRRIP 1.0 (its LLC behaviour differs, but its cycle count is identical). Cycle counts move in 12,000-cycle steps on this trace; that's to check in M3 |
-| **M3** Trace calibration (issue 6) | **Calibrated (2026-10-25); baselines pending.** The 19 CRC-2 traces ArchAgent used were run at 10M + 10M, 20M + 50M and 50M + 200M with the four built-in policies: 228 runs, as the project's first Slurm arrays (jobs 95102, 95199, 95240).
+| **M3** Trace calibration (issue 6) | **Done (2026-10-25).** The 19 CRC-2 traces ArchAgent used were run at 10M + 10M, 20M + 50M and 50M + 200M with the four built-in policies: 228 runs, as the project's first Slurm arrays (jobs 95102, 95199, 95240).
 - **Admitted:** 14 traces.
 - **Evolution length:** L2 (20M + 50M), the flagged fallback: right ranking, but up to 1.5 pp low.
 - **Issues:** 6 fixed, 11 closed.
-- **Left:** the LRU baselines of `crc2-evolve-v1` and `crc2-validate-v1`, which must reproduce the calibration's cycles exactly |
-| M4 Single-job prototype with real fitness | Planned |
+- **Baselines:** jobs 95426 and 95440 ran the LRU baselines of `crc2-evolve-v1` and `crc2-validate-v1`. All 28 reproduce the calibration's cycles exactly, across 17 nodes, so results don't depend on the node |
+| M4 Single-job prototype with real fitness | **Next.** OpenEvolve in one GPU job, scoring candidates with `champsim_ipc` on `crc2-evolve-v1` (about 1 h per candidate on 14 CPUs) |
 | M5 Staged generations (issue 10) · M6 Long-run hardening · M7 Comparing levers | Planned |

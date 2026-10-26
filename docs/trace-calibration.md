@@ -1,5 +1,7 @@
 # Trace calibration (M3)
 
+*Done 2026-10-25.*
+
 M3 chooses the traces and simulation lengths evolution will use. `smoke-v1` exercises the plumbing, but its one trace hardly uses the LLC, so every policy scores within 0.2% of LRU (`docs/status.md` issue 6). This page records:
 - where the traces come from
 - the rules for choosing traces and a length, fixed before any results
@@ -177,4 +179,13 @@ Neither short length met the 0.5 pp rule, so the rule's fallback applies: L2, fl
 
 **The analysis** is in `$AFAR_RESULTS/calibration/crc2-v1-analysis.json`.
 
-**Baselines:** the LRU baselines of both manifests run as arrays (`TARGETS=baseline`). Then `python -m evaluator.calibrate --check-baselines` checks that each reproduces the calibration's LRU cycle count exactly. They are the same simulation, run again, usually on other nodes.
+**Baselines:** the LRU baselines of both manifests ran as arrays (`TARGETS=baseline`) at commit `fa9b49c`:
+
+| Manifest | Job | Wall time | Result |
+|---|---|---|---|
+| `crc2-evolve-v1` | 95426 | 53 min | 14/14 reproduce the L2 calibration's LRU cycles exactly |
+| `crc2-validate-v1` | 95440 | 4 h 12 min | 14/14 reproduce the reference calibration's LRU cycles exactly |
+
+`python -m evaluator.calibrate --check-baselines` compared each baseline with its calibration twin, the same simulation run independently.
+- **27 of the 28 pairs ran on different nodes,** 17 nodes in all, including `homacs`. So results don't depend on the node, and candidates can be scored on any CPU node against these baselines.
+- **Run time does depend on the node.** mcf's 50M + 200M run took 15,043 s on `c1`, against 13,112 s on `c17`, with identical cycles. Across the calibration's four mcf runs the range was 2.6–4.2 h, so `--time` and `run_timeout_s` keep their margins.
