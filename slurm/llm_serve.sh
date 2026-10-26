@@ -1,6 +1,7 @@
 # Run the pinned vLLM server as a sidecar inside a GPU job.
 #
-# Source after env/site.sh and configs/llm/serve.env, from the repo root:
+# Source after env/site.sh, configs/llm/vllm.env and a model profile
+# (configs/models/<name>.env), from the repo root:
 #     source slurm/llm_serve.sh
 #     llm_start
 #     llm_wait_ready 900
@@ -14,13 +15,18 @@
 # the /v1 endpoints only (vLLM security docs), so the server also lives only as
 # long as the job.
 #
-# AFAR_LLM_FAKE=1 starts scripts/fake_llm_server.py instead of vLLM, so a job
-# script can be tested on coe-hpc1 without a GPU. AFAR_LLM_FAKE_FAIL=1 makes
+# The fake-v1 profile (LLM_SERVER=fake), or AFAR_LLM_FAKE=1 with any profile,
+# starts scripts/fake_llm_server.py instead of vLLM, so a job script can be
+# tested on coe-hpc1 without a GPU. AFAR_LLM_FAKE_FAIL=1 makes
 # that stand-in die at start-up; AFAR_LLM_FAKE_DELAY=<s> makes it load slowly;
 # AFAR_LLM_FAKE_REPLY=<file> makes it answer with that file's text, e.g. a
 # reply recorded from a real run.
 
 _llm_py=".venv/controller/bin/python"
+
+llm_is_fake() {
+    [[ "${AFAR_LLM_FAKE:-0}" == 1 || "${LLM_SERVER:-vllm}" == fake ]]
+}
 
 # Number GPUs by PCI bus inside the container, as nvidia-smi and Slurm do
 # (CUDA's default order is fastest-first), so logs and CUDA agree on "GPU 0".
@@ -30,7 +36,7 @@ export APPTAINERENV_CUDA_DEVICE_ORDER=PCI_BUS_ID
 # CUDA memory query vLLM starts with. Fails in seconds on an unusable GPU, e.g.
 # cs002 GPU 0, which had uncorrectable ECC errors (docs/llm-serving.md, R5).
 llm_gpu_preflight() {
-    if [[ "${AFAR_LLM_FAKE:-0}" == 1 ]]; then
+    if llm_is_fake; then
         return 0
     fi
     local gpu="${CUDA_VISIBLE_DEVICES:?no GPU allocated to this job}"
@@ -80,7 +86,7 @@ llm_start() {
     mkdir -p "$cache"
     chmod 700 "/tmp/${USER}" "$cache"
 
-    if [[ "${AFAR_LLM_FAKE:-0}" == 1 ]]; then
+    if llm_is_fake; then
         VLLM_API_KEY="$AFAR_LLM_API_KEY" "$_llm_py" scripts/fake_llm_server.py \
             --port "$AFAR_LLM_PORT" --served-model-name "$SERVED_MODEL_NAME" \
             ${AFAR_LLM_FAKE_FAIL:+--exit-immediately} --startup-delay "${AFAR_LLM_FAKE_DELAY:-0}" \

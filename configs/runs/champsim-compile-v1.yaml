@@ -1,0 +1,17 @@
+# R7 as a run spec: OpenEvolve evolves the ChampSim LLC policy and every
+# candidate is only compiled (compile_only), so this tests the plumbing and
+# whether the model writes ChampSim-API C++ that compiles.
+#     make oe-check SPEC=champsim-compile-v1
+#     sbatch --export=ALL,SPEC=champsim-compile-v1 slurm/openevolve.sbatch
+spec_version: 1
+description: R7, compile-only fitness on the ChampSim LLC policy
+seed: seeds/evolved_repl.h
+model: qwen2.5-coder-7b-v1
+prompt: champsim-rewrite-v1
+search: champsim-rewrite-v1
+evaluator:
+  policy: compile_only
+  experiment: smoke-tiny-v1      # compile_only reads only its limits and ChampSim commit
+  parallel_candidates: 1
+  cpus_per_candidate: 1
+iterations: 10

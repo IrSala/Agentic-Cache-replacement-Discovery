@@ -8,9 +8,9 @@ __pycache__/
 build/
 
 # Experiment outputs (later phases); logs/ exists so sbatch --output can write there
-campaigns/
-results/
-runs/
+/campaigns/
+/results/
+/runs/
 logs/*
 !logs/.gitkeep
 

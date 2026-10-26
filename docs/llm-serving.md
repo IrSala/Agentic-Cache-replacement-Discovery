@@ -30,7 +30,7 @@ Measured by `slurm/discover_gpu.sbatch` (job 90582, node `cs002`) and `slurm/che
 
 ## Pinned assets (R4)
 
-Pins live in `configs/llm/serve.env`. Paths are under `$AFAR_ASSETS` (`/data/cmpe295-bond/$USER/afar`).
+The vLLM image is pinned in `configs/llm/vllm.env`, and each model in a profile, `configs/models/<name>.env`; a run spec names its model by profile (`docs/run-specs.md`). Before M4 both lived in `configs/llm/serve.env`, which now just sources the default profile. Paths are under `$AFAR_ASSETS` (`/data/cmpe295-bond/$USER/afar`).
 
 | Asset | Pin | Location | Status |
 |---|---|---|---|
@@ -39,7 +39,7 @@ Pins live in `configs/llm/serve.env`. Paths are under `$AFAR_ASSETS` (`/data/cmp
 
 **Sharing one copy:** jobs only read these two paths, and the model is mounted read-only (`--bind …:/model:ro`).
 - **Permissions:** `/data/cmpe295-bond` is open only to the group, and the files are group-readable but not group-writable. Other members can set `AFAR_ASSETS=/data/cmpe295-bond/011383814/afar` and skip `make llm-fetch` and `slurm/build_sif.sbatch`.
-- **Verifying a copy:** compare `sha256sum` of the `.sif` with `VLLM_SIF_SHA256` in `serve.env`, and check that the model's `.complete` marker names the pinned revision.
+- **Verifying a copy:** compare `sha256sum` of the `.sif` with `VLLM_SIF_SHA256` in `vllm.env`, and check that the model's `.complete` marker names the pinned revision.
 - **Not yet tested from another account.** `make check` still requires write access (`docs/status.md`, issue 7).
 
 ### How the container is built (two steps)
@@ -65,7 +65,7 @@ The `vllm` command-line tool needs a GPU to detect: on a CPU node it fails with 
 - Caches go to node-local `/tmp/$USER/afar-llm` (mode 0700), and the server is stopped when the job exits.
 - `llm_gpu_preflight` checks the allocated GPU first.
 
-`AFAR_LLM_FAKE=1` swaps in `scripts/fake_llm_server.py`, so job scripts can be tested on coe-hpc1.
+`AFAR_LLM_FAKE=1`, or the model profile `fake-v1` (`LLM_SERVER=fake`), swaps in `scripts/fake_llm_server.py`, so job scripts can be tested on coe-hpc1.
 
 **Remaining exposure:** on a shared node, other users can reach `127.0.0.1`. vLLM's key protects only the `/v1`-style endpoints, and some others can run inference without it (vLLM security docs). The mitigation is that the port and key are random per job and the server lives only as long as the job.
 

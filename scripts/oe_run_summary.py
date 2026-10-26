@@ -123,6 +123,14 @@ def main():
     success = ("applied; scored", "applied; completed")
 
     print(f"run: {args.run}  logs: {', '.join(p.name for p in logs)}")
+    # Runs from slurm/openevolve.sbatch record the parts they were assembled from.
+    run_json = args.run / "run.json"
+    if run_json.exists():
+        run = json.loads(run_json.read_text())
+        ev = run["evaluator"]
+        print(f"parts: model {run['model']['profile']}, prompt {run['prompt']['profile']}, search {run['search']['profile']}, "
+              f"evaluator {ev.get('policy') or ev.get('openevolve_file')}"
+              f"{' on ' + ev['experiment'] if 'experiment' in ev else ''}; jobs {[j['job_id'] for j in run['jobs']]}")
     # secs = the worker's whole iteration; eval = the evaluator's part of it; the
     # rest is almost all waiting for the LLM.
     fmt = lambda x, spec: "" if x is None else format(x, spec)

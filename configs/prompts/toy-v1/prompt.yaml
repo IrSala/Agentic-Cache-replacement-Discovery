@@ -1,0 +1,4 @@
+# Prompt profile for OpenEvolve's function_minimization example (R6).
+description: OpenEvolve's function-minimization example, as in R6
+requires: {}
+openevolve: {}

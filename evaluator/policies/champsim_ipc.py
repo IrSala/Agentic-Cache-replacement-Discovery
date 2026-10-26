@@ -16,6 +16,7 @@ with ChampSim's log and JSON in out_dir/raw/. A built-in module (candidate.built
 skips the static checks and the syntax check; that's how baselines are built.
 """
 
+import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -24,7 +25,8 @@ from evaluator import champsim_build as cb
 from evaluator import fitness as fitness_mod
 from evaluator import prebuilt, results, static_checks
 from evaluator.policies.base import Build, InfraError, Outcome, Policy
-from evaluator.policies.compile_only import check_infra, compiler_version, syntax_check
+from evaluator.policies.compile_only import (COMPILE_TIMEOUT_S, check_infra, compiler_version, preflight_seed,
+                                             syntax_check)
 
 RUN_LIMITS = {"as_bytes": 8 << 30, "fsize_bytes": 1 << 30}   # plus cpu_s = run timeout + 60
 SUMMARY_CHARS = 2000
@@ -37,13 +39,27 @@ def _tail(text, chars=SUMMARY_CHARS):
 
 class ChampsimIPC(Policy):
     name = "champsim_ipc"
+    needs_baselines = True
+    needs_simulation = True
+
+    def time_limit_s(self, manifest, cpus):
+        """The syntax check, then the build, then the traces in waves of `cpus`."""
+        limits, traces = manifest["limits"], len(manifest["traces"])
+        return COMPILE_TIMEOUT_S + limits["build_timeout_s"] + math.ceil(traces / max(1, cpus)) * limits["run_timeout_s"]
+
+    def preflight(self, ctx):
+        preflight_seed(ctx)
+        missing = ctx.manifest.check_traces()
+        if missing:
+            raise InfraError("; ".join(missing))
+        prebuilt.ensure(ctx.cxx, ctx.jobs)
 
     # --- stages -------------------------------------------------------------
 
     def static_check(self, candidate, ctx):
         if candidate.builtin:
             return None
-        seed = check_infra(ctx.cxx)
+        seed = check_infra(ctx.cxx, ctx.seed)
         return static_checks.static_problem(candidate.code, seed, ctx.manifest["limits"]["max_source_bytes"])
 
     def build(self, candidate, ctx):

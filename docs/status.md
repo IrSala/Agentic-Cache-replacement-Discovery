@@ -7,7 +7,8 @@ As of 2026-10-25. What works, how it was verified, what was measured, and what's
 - **Phase 1 is complete.** A fresh clone of the GitHub repo builds on coe-hpc1 with one `make setup`, and runs on COE-HPC3 with no modules. A GPU job serves a pinned 7B model with vLLM next to OpenEvolve, and OpenEvolve evolves the real target: a ChampSim LLC replacement policy in one C++ header.
 - **Candidates can now be scored for real (M2).** `evaluator/evaluate_candidate.py` (the `champsim_ipc` policy) builds a candidate into ChampSim on an HPC3 node, runs the manifest's traces, and scores IPC against LRU. The seed scores exactly 1.0. OpenEvolve runs still use the compile-only policy until M4 switches them over.
 - **A research trace set is calibrated (M3).** 14 of the 19 CRC-2 traces ArchAgent used separate the built-in policies. On them, the built-ins rank as in the literature (SHiP +5.95%, DRRIP +5.73%, SRRIP +5.15% over LRU at 50M + 200M). Evolution will score at 20M + 50M (`crc2-evolve-v1`) and confirm at 50M + 200M (`crc2-validate-v1`).
-- In BUILD_PLAN's terms, phases 0–3 are done, and phase 4 is started (table below). Roadmap milestones M0–M3 are done; M4 (OpenEvolve with real fitness) is next.
+- In BUILD_PLAN's terms, phases 0–3 are done, and phase 4 is started (table below). Roadmap milestones M0–M3 are done. M4 is in progress: part A, the modular run specs, passes its checks on coe-hpc1 and needs one HPC3 GPU job; part B (real fitness) follows.
+- **Runs are assembled from swappable parts (M4 part A).** A run spec, `configs/runs/<name>.yaml`, names the seed, model profile, prompt profile, search profile and evaluator policy, and one generic job, `slurm/openevolve.sbatch`, runs any spec (`docs/run-specs.md`).
 
 ## Where each BUILD_PLAN phase stands
 
@@ -31,10 +32,10 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | LRU baselines for a manifest, as validated result records | `sbatch slurm/baseline.sbatch` (or `make baseline-local EXP=smoke-tiny-v1`) | `docs/experiment-contract.md` §2–§3 |
 | Fetch and pin LLM assets | `make llm-fetch`, then `sbatch slurm/build_sif.sbatch` | `docs/llm-serving.md` |
 | Serve the model inside a GPU job | `slurm/llm_serve.sh` (GPU preflight, random port and key, health wait, clean stop); tested by `slurm/llm_ping.sbatch` | `docs/llm-serving.md` |
-| OpenEvolve on a toy, with resume | `slurm/openevolve_toy.sbatch` | `docs/llm-serving.md` (R6) |
-| OpenEvolve on the ChampSim policy, compile-only | `slurm/openevolve_champsim_compile.sbatch` | `docs/champsim-evaluator.md` |
+| Any OpenEvolve run, from a run spec, with resume | `make oe-check SPEC=<name>`, then `sbatch --export=ALL,SPEC=<name> slurm/openevolve.sbatch` (`RESUME=runs/<run>` to continue) | `docs/run-specs.md` |
+| OpenEvolve on a toy / on the ChampSim policy, compile-only | `SPEC=toy-v1` (R6) / `SPEC=champsim-compile-v1` (R7); the old `slurm/openevolve_*.sbatch` are wrappers until M5 | `docs/llm-serving.md`, `docs/champsim-evaluator.md` |
 | Evaluate a candidate for real: baseline, candidate file or built-in policy | `sbatch slurm/evaluate.sbatch` (or `python -m evaluator.evaluate_candidate`) | `docs/champsim-evaluator.md` (M2 part B) |
-| Test job scripts without a GPU | `AFAR_LLM_FAKE=1` (plus `AFAR_LLM_FAKE_REPLY=<file>` to replay a real reply) | `docs/llm-serving.md` |
+| Test job scripts without a GPU | `AFAR_LLM_FAKE=1` or the `fake-v1` model profile (plus `AFAR_LLM_FAKE_REPLY=<file>` to replay a real reply) | `docs/llm-serving.md` |
 | Summarize a run | `make oe-summary RUN=runs/<name>-<jobid>` | |
 
 ## Verified on HPC3
@@ -79,7 +80,8 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | Build on coe-hpc1; a portable CPython; ChampSim linked statically | HPC3 is offline and has a different module tree; anything built for glibc 2.17 also runs on 2.34 | `README.md` |
 | No modules at run time; paths come from `env/site.sh` | Module names on coe-hpc1 don't exist on HPC3 | `env/modules.sh`, `env/site.sh` |
 | vLLM as a sidecar in the same GPU job, from a digest-pinned SIF | Self-contained jobs, with no long-running service to manage | `docs/llm-serving.md` |
-| Qwen2.5-Coder-7B-Instruct, bf16, 16K context | Fits a 40 GB A100 with room for the KV cache; permissive license | `configs/llm/serve.env` |
+| Qwen2.5-Coder-7B-Instruct, bf16, 16K context | Fits a 40 GB A100 with room for the KV cache; permissive license | `configs/models/qwen2.5-coder-7b-v1.env` |
+| Runs assembled from named, versioned parts (run specs) | The model, prompt, search settings and evaluator policy must be swappable without editing job scripts, and every run must record exactly which parts it used. Settings that depend on other parts (evaluator timeout, code-length cap, CPU budget) are derived, never hand-kept | `docs/run-specs.md` |
 | Full rewrites, not diffs | The 7B model ignored the SEARCH/REPLACE format (0/10 applied) | R6 |
 | No top-level LLM seed | vLLM honours the seed, so identical prompts got identical replies | R6 |
 | The evaluator enforces the EVOLVE-BLOCK itself | OpenEvolve 0.4.0's `enforce_evolve_blocks` never reaches its workers | `docs/experiment-contract.md` |
@@ -93,7 +95,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | # | Issue | Effect | Proposed fix | State |
 |---|---|---|---|---|
 | 1 | The seed's header comment ("port of replacement/lru") invites edits outside the block | In job 93495, all 5 `invalid_candidate` results were only this comment | Made policy-neutral: the LRU note now sits inside the block | **Fixed in M1** |
-| 2 | The compile-only stub scores every compiling candidate 1.0 | No fitness signal; OpenEvolve keeps the seed as "best" on ties | `champsim_ipc` (M2) gives real fitness; OpenEvolve runs switch to it in M4 (`evaluator/openevolve_champsim.py`) | **Fixed in M2**; used from M4 |
+| 2 | The compile-only stub scores every compiling candidate 1.0 | No fitness signal; OpenEvolve keeps the seed as "best" on ties | `champsim_ipc` (M2) gives real fitness; OpenEvolve runs switch to it in M4 (`evaluator/openevolve_adapter.py`) | **Fixed in M2**; used from M4 |
 | 3 | `-fsyntax-only` doesn't link | A member declared but never defined passes | `champsim_ipc` builds and links every candidate; the self-test's link-error case gives `compile_failed` | **Fixed in M2** |
 | 4 | Compiler feedback rarely reaches the model | OpenEvolve shows artifacts only to a program's children, and failures score 0 | Accept, or a custom prompt template later | Known |
 | 5 | Which compiler builds candidates on HPC3? | coe-hpc1 built ChampSim and its vcpkg libraries with gcc 12.2; HPC3 nodes have only gcc 11.5 | **Decided 2026-10-23:** the nodes' system gcc 11.5, with no sandbox. **Tested (job 94191):** it builds and links against the gcc-12 libraries, with dynamic libstdc++ | **Resolved** |
@@ -101,7 +103,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | 7 | `env/check.sh` requires `AFAR_ASSETS` to be writable | Teammates sharing a read-only copy fail `make check` | `check.sh` accepts a readable copy; `make check` passes `AFAR_ASSETS`/`AFAR_RESULTS` through its clean environment; `llm-fetch` refuses an unwritable one with a clear message | **Fixed in M1** |
 | 8 | pip's cache isn't redirected | `~/.cache/pip` is 3 GB on the 99%-full `/home` (mostly older than this repo) | The Makefile runs pip with `--no-cache-dir`. The existing 3 GB is the user's to delete | **Fixed in M1** |
 | 9 | `cs002` GPU 0 is faulty (73 uncorrectable ECC errors) | Jobs exclude `cs002` and lose its 3 healthy GPUs | Report to HPC support (a note is drafted) | The user's call |
-| 10 | Two near-identical OpenEvolve job scripts | Changes have to be made twice | A shared helper once a third script appears | Deferred |
+| 10 | Two near-identical OpenEvolve job scripts | Changes have to be made twice | One generic job, `slurm/openevolve.sbatch SPEC=`; the two old scripts are wrappers until M5 | **Fixed in M4 part A** |
 | 11 | Cycle counts on `smoke-v1` move in 12,000-cycle steps; DRRIP's LLC behaviour differs from LRU's, yet its cycle count is identical (job 94248) | Fitness resolution of about 0.064% on this trace, so small policy differences can read as exactly 1.0 | Check in M3 on LLC-sensitive traces and longer runs: does the step persist, and does DRRIP then differ? If it does, find its cause before trusting small fitness differences. Ruled out so far: warmup (361,901 cycles for every policy) and DRAM refresh (tREF = 32 ms / 8192 = 15,625 core cycles at 4 GHz, not 12,000) | **Closed in M3:** on all 14 admitted traces, policies' cycle counts differ at 1-cycle resolution and DRRIP differs from LRU. The quantum reappears only on near-flat `tonto_2834B` (−36,000 / +12,000 / −48,000), which is excluded. Its cause is still unknown |
 
 ## Next steps
@@ -118,5 +120,7 @@ The plan to an autonomous, multi-node research system is in **`docs/roadmap.md`*
 - **Evolution length:** L2 (20M + 50M), the flagged fallback: right ranking, but up to 1.5 pp low.
 - **Issues:** 6 fixed, 11 closed.
 - **Baselines:** jobs 95426 and 95440 ran the LRU baselines of `crc2-evolve-v1` and `crc2-validate-v1`. All 28 reproduce the calibration's cycles exactly, across 17 nodes, so results don't depend on the node |
-| M4 Single-job prototype with real fitness | **Next.** OpenEvolve in one GPU job, scoring candidates with `champsim_ipc` on `crc2-evolve-v1` (about 1 h per candidate on 14 CPUs) |
+| M4 Single-job prototype with real fitness | **In progress.**
+- **Part A, modular run specs:** passes on coe-hpc1. The resolver's 21 self-test cases; equivalence with R6/R7's configs, field by field; fake-LLM runs of both specs, a resume and a prompt swap; the policy contract suite. Needs one HPC3 GPU job (`SPEC=champsim-compile-v1`).
+- **Part B, real fitness:** next, with `champsim_ipc` on a dev manifest and then `crc2-evolve-v1` (about 1 h per candidate on 14 CPUs) |
 | M5 Staged generations (issue 10) · M6 Long-run hardening · M7 Comparing levers | Planned |

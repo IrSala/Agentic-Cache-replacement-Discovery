@@ -1,0 +1,20 @@
+# Search profile: how OpenEvolve explores, for runs that name
+# `search: champsim-rewrite-v1`. Immutable once a run uses it; make a -v2.
+# Any OpenEvolve top-level or database.* key; the resolver rejects unknown ones.
+description: R7's settings, full rewrites with 3 islands
+openevolve:
+  checkpoint_interval: 1     # OpenEvolve 0.4.0 skips an interval checkpoint if that iteration fails, and saves none on SIGTERM
+  random_seed: null          # a top-level seed becomes one fixed LLM seed on every request (R6, job 93362)
+  # Full rewrites: the 7B model ignores the SEARCH/REPLACE format (R6, job 93362).
+  diff_based_evolution: false
+  # No effect in OpenEvolve 0.4.0 (never reaches the workers); the evaluator
+  # enforces the EVOLVE-BLOCK itself.
+  enforce_evolve_blocks: true
+  database:
+    population_size: 50
+    archive_size: 20
+    num_islands: 3
+    elite_selection_ratio: 0.2
+    exploitation_ratio: 0.7
+    similarity_threshold: 0.99   # no effect without database.embedding_model
+    random_seed: 42              # reproducible sampling of parents and inspirations

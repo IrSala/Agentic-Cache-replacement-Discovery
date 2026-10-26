@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Download the pinned LLM assets (configs/llm/serve.env) into $AFAR_ASSETS.
+# Download the pinned vLLM server (configs/llm/vllm.env) and one model profile's
+# weights (configs/models/<PROFILE>.env) into $AFAR_ASSETS.
 #
-# Usage: make llm-fetch [LLM_PARTS="sandbox model"]
+# Usage: make llm-fetch [PROFILE=qwen2.5-coder-7b-v1] [LLM_PARTS="sandbox model"]
 #        (coe-hpc1 only: needs internet and the apptainer module)
 #
 # Safe to re-run: finished assets are skipped. Each asset is written under a
@@ -9,7 +10,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 source env/site.sh
-source configs/llm/serve.env
+source configs/llm/vllm.env
+profile="configs/models/${PROFILE:-qwen2.5-coder-7b-v1}.env"
+[[ -f "$profile" ]] || { echo "llm_fetch: no model profile $profile" >&2; exit 2; }
+source "$profile"
 
 if ! { mkdir -p "$AFAR_ASSETS" && [[ -w "$AFAR_ASSETS" ]]; } 2>/dev/null; then
     echo "llm_fetch: AFAR_ASSETS ($AFAR_ASSETS) is not writable." >&2
@@ -45,6 +49,10 @@ fetch_sandbox() {
 
 # Model: weights at the pinned revision into their own directory.
 fetch_model() {
+    if [[ "$LLM_SERVER" != vllm ]]; then
+        echo "model: $profile serves with ${LLM_SERVER}; nothing to download"
+        return
+    fi
     local model_dir="${models}/${MODEL_DIR}"
     if [[ -f "${model_dir}/.complete" ]]; then
         echo "model: ${model_dir} (present)"

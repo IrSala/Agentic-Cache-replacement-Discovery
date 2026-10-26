@@ -21,9 +21,12 @@ TRACE ?=
 OUT        ?= runs/toy-manual
 CHECKPOINT ?=
 ITERATIONS ?=
-# make llm-fetch: which pinned LLM assets to download.
+# make llm-fetch: which pinned LLM assets to download, and for which model profile.
 LLM_PARTS  ?= sandbox model
+PROFILE    ?= qwen2.5-coder-7b-v1
 EXP        ?=
+# make oe-check: one run spec (a name in configs/runs/); empty checks them all.
+SPEC       ?=
 
 CHAMPSIM_DIR    := external/ChampSim
 BASELINE_CONFIG := configs/champsim/baseline.json
@@ -52,7 +55,7 @@ PIP_FLAGS := --quiet --disable-pip-version-check --only-binary=:all: --no-cache-
 CHAMPSIM_LDFLAGS := -static-libstdc++ -static-libgcc
 
 .PHONY: help setup submodules python venvs vcpkg champsim check check-runtime smoke \
-        env-record lock clean distclean oe-check-config oe-toy-manual oe-summary oe-compile-selftest \
+        env-record lock clean distclean oe-check oe-check-config oe-toy-manual oe-summary oe-compile-selftest \
         evaluator-selftest evaluate-selftest baseline-local llm-fetch traces-fetch
 
 help: ## Show this help
@@ -108,7 +111,13 @@ smoke: ## Run 10K+10K instructions of TRACE=<path> through the baseline binary
 	    print("smoke ok:", roi["instructions"], "instructions,", roi["cycles"], "cycles")'
 
 # Configs reference ${AFAR_LLM_API_KEY}, which GPU jobs set; any value lets them load here.
-oe-check-config: venvs ## Load configs/openevolve/*.yaml with OpenEvolve's loader; flag unknown keys
+oe-check: venvs ## Validate run specs and every profile they name (SPEC=<name>; default all of configs/runs/)
+	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.runspec --selftest
+	$(RUN_ENV) for s in $(or $(SPEC),$(basename $(notdir $(wildcard configs/runs/*.yaml)))); do \
+	    $(VENV_DIR)/controller/bin/python -m controller.runspec --check $$s || exit 1; done
+	$(MAKE) --no-print-directory oe-check-config
+
+oe-check-config: venvs ## Load the hand-written configs/openevolve/*.yaml with OpenEvolve's loader; flag unknown keys
 	$(RUN_ENV) AFAR_LLM_API_KEY=validation-only $(VENV_DIR)/controller/bin/python scripts/oe_check_config.py configs/openevolve/*.yaml
 
 # OpenEvolve's own example with llm.manual_mode: each prompt is written to
@@ -140,8 +149,8 @@ baseline-local: venvs ## LRU baseline for EXP=<manifest id> on this host; second
 	@[ -n "$(EXP)" ] || { echo "usage: make baseline-local EXP=smoke-tiny-v1" >&2; exit 2; }
 	$(RUN_ENV) $(VENV_DIR)/evaluator/bin/python -m evaluator.run_baseline --manifest configs/experiments/$(EXP).json
 
-llm-fetch: venvs ## Download the pinned model and unpack the vLLM sandbox into AFAR_ASSETS (LLM_PARTS=; needs internet)
-	$(BUILD_ENV) scripts/llm_fetch.sh $(LLM_PARTS)
+llm-fetch: venvs ## Download a model profile's weights and unpack the vLLM sandbox into AFAR_ASSETS (PROFILE=, LLM_PARTS=; needs internet)
+	$(BUILD_ENV) PROFILE=$(PROFILE) scripts/llm_fetch.sh $(LLM_PARTS)
 
 traces-fetch: venvs ## Download the 19 CRC-2 traces ArchAgent used into AFAR_ASSETS and pin them (~28 GB zip; needs internet)
 	$(RUN_ENV) nice -n 19 $(VENV_DIR)/evaluator/bin/python -I scripts/traces_fetch_crc2.py

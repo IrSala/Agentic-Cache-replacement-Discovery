@@ -1,0 +1,15 @@
+# Search profile for OpenEvolve's function_minimization example (R6).
+description: R6's toy settings
+openevolve:
+  checkpoint_interval: 1
+  random_seed: null
+  diff_based_evolution: false
+  enforce_evolve_blocks: true
+  database:
+    population_size: 50
+    archive_size: 20
+    num_islands: 3
+    elite_selection_ratio: 0.2
+    exploitation_ratio: 0.7
+    similarity_threshold: 0.99
+    random_seed: 42

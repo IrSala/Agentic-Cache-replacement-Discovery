@@ -67,7 +67,7 @@ There is one JSON record per (candidate, trace). Every pair in the manifest gets
     - Demand accesses are LLC `LOAD` + `RFO`. `llc_demand_mpki` = 1000 × demand misses / instructions, and `llc_hit_rate` = demand hits / demand accesses (0.0 if there are none).
   - Records are written to `$AFAR_RESULTS` (`env/site.sh`), atomically (a temporary file, then a rename), with ChampSim's raw log and JSON in `raw/` beside them:
     - `baselines/<experiment>/<trace>.json`: the LRU baseline, built by the same pipeline as candidates (`evaluate_candidate --baseline`)
-    - `evaluations/<experiment>/<candidate id>/`: candidates, plus a `summary.json`
+    - `evaluations/<experiment>/<policy>/<candidate id>/`: candidates, plus a `summary.json`. The policy is part of the path so two policies' results for one candidate never collide; M2's records predate this and sit at `evaluations/<experiment>/<candidate id>/`
     - `reference/<experiment>/`: M1's runs of the coe-hpc1-built binary, a reproducibility check only
 - **Provenance:**
   - `logs`: build log, run log and ChampSim JSON path

@@ -62,16 +62,17 @@ def compiler_version(cxx):
     return out.splitlines()[0] if out else "unknown"
 
 
-def check_infra(cxx):
-    """Return the seed text, or raise InfraError if the environment can't compile candidates."""
+def check_infra(cxx, seed=None):
+    """Return the seed text (default seeds/evolved_repl.h), or raise InfraError if the environment can't compile candidates."""
+    seed = Path(seed) if seed else SEED
     if shutil.which(cxx) is None:
         raise InfraError(f"compiler {cxx!r} not found (set AFAR_CXX)")
-    needed = [SEED, CHAMPSIM / ".csconfig" / "module_decl.inc"]
+    needed = [seed, CHAMPSIM / ".csconfig" / "module_decl.inc"]
     needed += [CHAMPSIM / name for name in ("global.options", "absolute.options", "module.options")]
     missing = [str(p) for p in needed if not p.exists()]
     if missing:
         raise InfraError(f"missing {', '.join(missing)}; run `make champsim` on coe-hpc1")
-    return SEED.read_text()
+    return seed.read_text()
 
 
 def syntax_check(code, cxx, timeout=COMPILE_TIMEOUT_S):
@@ -89,11 +90,26 @@ def syntax_check(code, cxx, timeout=COMPILE_TIMEOUT_S):
     return Build("completed", "", seconds, output)
 
 
+def preflight_seed(ctx):
+    """The seed must pass the checks every candidate gets, on this host's compiler."""
+    seed = check_infra(ctx.cxx, ctx.seed)
+    checked = syntax_check(seed, ctx.cxx)
+    if checked.status != "completed":
+        raise InfraError(f"the seed itself fails the compile check with {ctx.cxx}: {checked.reason}\n"
+                         f"{checked.output[-OUTPUT_TAIL_CHARS:]}")
+
+
 class CompileOnly(Policy):
     name = "compile_only"
 
+    def time_limit_s(self, manifest, cpus):
+        return COMPILE_TIMEOUT_S
+
+    def preflight(self, ctx):
+        preflight_seed(ctx)
+
     def static_check(self, candidate, ctx):
-        self._seed = check_infra(ctx.cxx)
+        self._seed = check_infra(ctx.cxx, ctx.seed)
         limit = ctx.manifest["limits"]["max_source_bytes"] if ctx.manifest else MAX_SOURCE_BYTES
         return static_checks.static_problem(candidate.code, self._seed, limit)
 
