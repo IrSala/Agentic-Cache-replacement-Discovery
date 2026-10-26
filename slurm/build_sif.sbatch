@@ -19,7 +19,7 @@
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR}"
 source env/site.sh
-source configs/llm/serve.env
+source configs/llm/vllm.env
 
 sif="${AFAR_ASSETS}/containers/${VLLM_SIF}"
 sandbox="${AFAR_ASSETS}/containers/${VLLM_SANDBOX}"

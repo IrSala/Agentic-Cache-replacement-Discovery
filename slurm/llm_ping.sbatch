@@ -24,7 +24,8 @@
 set -euo pipefail
 cd "${SLURM_SUBMIT_DIR}"
 source env/site.sh
-source configs/llm/serve.env
+source configs/llm/vllm.env
+source "configs/models/${PROFILE:-qwen2.5-coder-7b-v1}.env"     # PROFILE=<model profile> to ping another model
 source slurm/llm_serve.sh
 
 echo "job=${SLURM_JOB_ID} node=$(hostname) date=$(date -Is) commit=$(git rev-parse --short HEAD 2>/dev/null)$(git diff --quiet HEAD 2>/dev/null || echo -dirty)"

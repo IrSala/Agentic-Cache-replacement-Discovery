@@ -42,6 +42,19 @@ def load_run():
     return Path(value), json.loads(Path(value).read_text())
 
 
+def summary_to_result(summary):
+    """(metrics, artifacts) for OpenEvolve from an evaluate_candidate summary; staged campaigns use it too."""
+    metrics = dict(summary.get("metrics") or {})
+    metrics["combined_score"] = float(summary["fitness"] or 0.0)
+    metrics.update({f"speedup_{t}": s for t, s in summary["speedups"].items()})
+    artifacts = {}
+    for key in ARTIFACT_KEYS:
+        value = summary["artifacts"].get(key) or (summary.get(key) if key in ("status", "reason") else None)
+        if value:
+            artifacts[key] = str(value)[-ARTIFACT_CHARS:]
+    return metrics, artifacts
+
+
 def evaluate(program_path):
     from openevolve.evaluation_result import EvaluationResult
 
@@ -58,14 +71,7 @@ def evaluate(program_path):
         policy=ev["policy"], campaign_id=run["run_id"], generation=0,
         cxx=os.environ.get("AFAR_CXX", "g++"), jobs=ev["cpus_per_candidate"], seed=ROOT / run["seed"]["path"])
 
-    metrics = dict(summary.get("metrics") or {})
-    metrics["combined_score"] = float(summary["fitness"] or 0.0)
-    metrics.update({f"speedup_{t}": s for t, s in summary["speedups"].items()})
-    artifacts = {}
-    for key in ARTIFACT_KEYS:
-        value = summary["artifacts"].get(key) or (summary.get(key) if key in ("status", "reason") else None)
-        if value:
-            artifacts[key] = str(value)[-ARTIFACT_CHARS:]
+    metrics, artifacts = summary_to_result(summary)
     line = {"at": results.now(), "job_id": os.environ.get("SLURM_JOB_ID"), "candidate_id": candidate.candidate_id,
             "status": summary["status"], "fitness": summary["fitness"], "cached": bool(summary.get("cached")),
             "seconds": round(time.monotonic() - started, 2)}

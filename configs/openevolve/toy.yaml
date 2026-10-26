@@ -13,7 +13,7 @@ checkpoint_interval: 1   # OpenEvolve 0.4.0 skips an interval checkpoint if that
 random_seed: null
 
 llm:
-  primary_model: "afar-llm"                # name the local server exposes (configs/llm/serve.env)
+  primary_model: "afar-llm"                # name the local server exposes (configs/llm/vllm.env)
   api_base: "http://127.0.0.1:8000/v1"     # default only; jobs override with --api-base
   api_key: "${AFAR_LLM_API_KEY}"           # random per job, exported by slurm/llm_serve.sh
   temperature: 0.7

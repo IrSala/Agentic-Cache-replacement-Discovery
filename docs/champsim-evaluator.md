@@ -104,7 +104,7 @@ Results on `smoke-v1` (1M warmup + 5M simulated instructions):
 | Seed (header-only port of `replacement/lru` at `410cee6`) | `seeds/evolved_repl.h` |
 | Evaluator (`evaluate(program_path)`) | `evaluator/compile_check.py` |
 | OpenEvolve config, including the system message describing the API | `configs/openevolve/champsim-compile.yaml` (since M4: the run spec `configs/runs/champsim-compile-v1.yaml`, with the prompt in `configs/prompts/champsim-rewrite-v1/`) |
-| GPU job | `slurm/openevolve_champsim_compile.sbatch` (since M4: `slurm/openevolve.sbatch SPEC=champsim-compile-v1`) |
+| GPU job | `slurm/openevolve_champsim_compile.sbatch` at the time; since M4, `slurm/openevolve.sbatch SPEC=champsim-compile-v1` (the old script was removed in M5) |
 | Self-test | `make oe-compile-selftest` (coe-hpc1), or `evaluator/compile_check.py --selftest` (run by the job on the node before the LLM starts) |
 
 ### How OpenEvolve calls it

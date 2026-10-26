@@ -7,10 +7,13 @@ Like vLLM started with VLLM_API_KEY, the /v1 endpoints require
 """
 
 import argparse
+import itertools
 import json
 import os
+import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 REPLY = "def total(xs):\n    return sum(xs)"
 
@@ -26,8 +29,15 @@ def main():
     parser.add_argument("--reply-file",
                         help="answer every chat completion with this file's text, e.g. a reply "
                              "recorded from a real run (default: a short canned reply)")
+    parser.add_argument("--reply-dir",
+                        help="answer with the files in this directory in turn (sorted by name), so a "
+                             "staged campaign's test generation gets varied candidates")
     args = parser.parse_args()
-    reply = open(args.reply_file).read() if args.reply_file else REPLY
+    if args.reply_dir:
+        replies = [f.read_text() for f in sorted(Path(args.reply_dir).iterdir()) if f.is_file()]
+    else:
+        replies = [open(args.reply_file).read() if args.reply_file else REPLY]
+    turn, turn_lock = itertools.cycle(replies), threading.Lock()
     if args.exit_immediately:
         print("fake server: simulated start-up failure", flush=True)
         raise SystemExit(1)
@@ -66,6 +76,8 @@ def main():
             request = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))) or b"{}")
             if request.get("model") != args.served_model_name:
                 return self._send(404, {"error": {"message": f"model {request.get('model')!r} not found"}})
+            with turn_lock:
+                reply = next(turn)
             self._send(200, {
                 "id": "chatcmpl-fake", "object": "chat.completion", "created": int(time.time()),
                 "model": args.served_model_name,

@@ -2,7 +2,7 @@
 
 A reproducible OpenEvolve + ChampSim environment for SJSU CoE HPC. It is the foundation for evolving ChampSim cache-replacement policies with OpenEvolve, staged across GPU (generation) and CPU (evaluation) Slurm jobs.
 
-**Status:** M2 of [docs/roadmap.md](docs/roadmap.md) is complete and M3 (trace calibration) is in progress; see [docs/status.md](docs/status.md) for what works and the evidence.
+**Status:** M0–M5 of [docs/roadmap.md](docs/roadmap.md) are complete, so evolution runs as staged campaigns across GPU and CPU nodes; M6 (hardening for long runs) is next. See [docs/status.md](docs/status.md) for what works and the evidence.
 - A fresh clone builds on coe-hpc1 with `make setup` and runs on COE-HPC3 with no modules.
 - One GPU job serves a pinned 7B model with vLLM next to OpenEvolve, which evolves a ChampSim LLC replacement policy.
 - The real evaluator builds each candidate into ChampSim, simulates the manifest's traces and scores IPC against LRU ([docs/experiment-contract.md](docs/experiment-contract.md)).
@@ -136,7 +136,6 @@ sbatch --exclude=cs002 --export=ALL,SPEC=champsim-compile-v1 slurm/openevolve.sb
 |---|---|---|
 | `slurm/openevolve.sbatch` | any run spec: `SPEC=toy-v1` (R6), `SPEC=champsim-compile-v1` (R7) | `runs/<spec>-<id>/`, with `run.json` and `evaluations.jsonl` |
 | `slurm/llm_ping.sbatch` | the vLLM server, checked through OpenEvolve's client | `logs/llm-ping-<id>.out` |
-| `slurm/openevolve_toy.sbatch`, `openevolve_champsim_compile.sbatch` | wrappers for `SPEC=toy-v1` and `SPEC=champsim-compile-v1` with R6/R7's resources, until M5 | as above |
 
 - **Resume** a run in its own directory, from its newest checkpoint, with `--export=ALL,SPEC=<name>,RESUME=runs/<run>`. `CHECKPOINT=<dir>` instead starts a new run from that checkpoint. `ITERATIONS=N` overrides the spec's count.
 - **Summarize** a run with `make oe-summary RUN=runs/<run>`, or list its parts with `python -m controller.runspec --describe runs/<run>`.
@@ -156,6 +155,9 @@ sbatch --exclude=cs002 --export=ALL,SPEC=champsim-compile-v1 slurm/openevolve.sb
 | `check-runtime` | only the run-time checks, in a clean environment |
 | `smoke TRACE=…` | 10K warmup + 10K simulated instructions, JSON output parsed |
 | `oe-check SPEC=…` | validate one run spec, or all of `configs/runs/`, with every part it names (the resolver's self-test first; no GPU) |
+| `campaign-start SPEC=…` | start a staged campaign (M5) from a run spec with a `campaign:` section; on g17 (`NAME=`, `EXCLUDE=`) |
+| `campaign-status C=…` / `campaign-stop C=…` / `campaign-resume C=…` | a campaign's state and generations / halt it after the current stage / resubmit its current stage |
+| `campaign-selftest` | the staged pipeline end to end on coe-hpc1: fake LLM, local executor, injected faults (~2 min) |
 | `oe-check-config` | load the hand-written `configs/openevolve/*.yaml` with OpenEvolve's loader; fail on unknown keys |
 | `oe-toy-manual` | run OpenEvolve's toy example with no LLM (`llm.manual_mode`). Each prompt appears as `$(OUT)/manual_tasks_queue/<id>.json`; answer it by writing `<id>.answer.json` containing `{"answer": "<SEARCH/REPLACE diff>"}`. Options: `OUT=`, `CHECKPOINT=<dir>` to resume, `ITERATIONS=` (counted from the checkpoint) |
 | `oe-summary RUN=…` | one row per iteration of an OpenEvolve run: outcome or evaluator status, score, LLM and evaluation seconds, tokens |
@@ -196,18 +198,19 @@ slurm/                          batch jobs (submit from the repo root on g17)
   llm_serve.sh                  sourced by GPU jobs: start, health-check and stop the vLLM sidecar
   llm_ping.sbatch               serve the model and check it through OpenEvolve's client
   openevolve.sbatch             one OpenEvolve run from a run spec (SPEC=), with resume (M4)
-  openevolve_toy.sbatch, openevolve_champsim_compile.sbatch   wrappers for SPEC=toy-v1 / champsim-compile-v1, until M5
+  campaign_generate.sbatch, campaign_evaluate.sbatch, campaign_aggregate.sbatch   a staged campaign's stages, submitted by the campaign itself (M5)
 configs/champsim/baseline.json  ChampSim configuration for baseline builds
 configs/runs/                   run specs: one OpenEvolve run configuration each, naming the parts below (docs/run-specs.md)
 configs/models/                 model profiles: qwen2.5-coder-7b-v1.env, fake-v1.env
 configs/prompts/                prompt profiles: a system message and OpenEvolve template overrides per directory
 configs/search/                 search profiles: OpenEvolve database and evolution settings
-configs/llm/vllm.env            the pinned vLLM image, shared by all model profiles (serve.env: old name, until M5)
+configs/llm/vllm.env            the pinned vLLM image, shared by all model profiles
 configs/openevolve/             OpenEvolve configs: toy.yaml, toy-manual.yaml, champsim-compile.yaml
 configs/experiments/           experiment manifests (contract §2): smoke-*, crc2-tiny-v1, crc2-cal-{L1,L2,ref}-v1, crc2-evolve-v1, crc2-validate-v1
 configs/traces/                 pinned trace sets: crc2-archagent19.json (sha256, size, instructions) and the CRC-2 zip's member list
 seeds/evolved_repl.h            the seed candidate: a header-only port of ChampSim's LRU
-controller/                     the OpenEvolve side: runspec.py (resolve and check run specs), oe_config.py
+controller/                     the OpenEvolve side: runspec.py (resolve and check run specs), oe_config.py,
+                                campaign.py and executor.py (staged campaigns), oe_adapter.py (the only code using OpenEvolve's internals)
 evaluator/                      candidate evaluation (a Python package; standard library only, except compile_check.py)
   compile_check.py              OpenEvolve evaluator for candidates (compile-only stub)
   manifest.py, results.py       experiment manifests and result records (contract §2, §3)
@@ -230,6 +233,7 @@ docs/champsim-evaluator.md      how candidates are checked and compiled, and R7 
 docs/experiment-contract.md     candidate format, manifest, result schema, fitness, failure policy (v0)
 docs/trace-calibration.md       M3: the CRC-2 trace suite, the calibration rules and their results
 docs/run-specs.md               M4: run specs, the swappable parts, and how to add one
+docs/campaigns.md               M5: staged campaigns (GPU generates, CPU arrays evaluate), their state and failure handling
 external/ChampSim/              ChampSim submodule
 runs/                           OpenEvolve output, one directory per job (ignored by git)
 logs/                           Slurm job logs (contents ignored by git)

@@ -1,0 +1,21 @@
+# M5: a staged campaign (controller/campaign.py, docs/campaigns.md). Each
+# generation, a GPU job writes 24 candidates, a CPU array evaluates them with
+# champsim_ipc on the 4-trace dev manifest (4 CPUs each, about 4 min), and an
+# aggregation job adds them to OpenEvolve's database and starts the next.
+#     make oe-check SPEC=m5-dev-v1
+#     make campaign-start SPEC=m5-dev-v1          (on g17)
+spec_version: 1
+description: M5, staged generations on the 4-trace dev manifest
+seed: seeds/evolved_repl.h
+model: qwen2.5-coder-7b-v1
+prompt: champsim-rewrite-v1
+search: champsim-rewrite-v1
+evaluator:
+  policy: champsim_ipc
+  experiment: crc2-dev-v1
+  cpus_per_candidate: 4
+campaign:
+  generations: 3
+  candidates_per_generation: 24   # 8 per island with the search profile's 3 islands
+  max_concurrent_tasks: 40
+  max_task_retries: 2

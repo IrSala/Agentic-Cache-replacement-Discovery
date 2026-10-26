@@ -1,13 +1,17 @@
 # Project status
 
-As of 2026-10-25. What works, how it was verified, what was measured, and what's next. Update this page at the end of each milestone. The plan going forward is in `docs/roadmap.md`.
+As of 2026-10-26. What works, how it was verified, what was measured, and what's next. Update this page at the end of each milestone. The plan going forward is in `docs/roadmap.md`.
 
 ## Summary
 
 - **Phase 1 is complete.** A fresh clone of the GitHub repo builds on coe-hpc1 with one `make setup`, and runs on COE-HPC3 with no modules. A GPU job serves a pinned 7B model with vLLM next to OpenEvolve, and OpenEvolve evolves the real target: a ChampSim LLC replacement policy in one C++ header.
-- **Candidates can now be scored for real (M2).** `evaluator/evaluate_candidate.py` (the `champsim_ipc` policy) builds a candidate into ChampSim on an HPC3 node, runs the manifest's traces, and scores IPC against LRU. The seed scores exactly 1.0. OpenEvolve runs still use the compile-only policy until M4 switches them over.
+- **Candidates can now be scored for real (M2).** `evaluator/evaluate_candidate.py` (the `champsim_ipc` policy) builds a candidate into ChampSim on an HPC3 node, runs the manifest's traces, and scores IPC against LRU. The seed scores exactly 1.0. OpenEvolve runs have used it since M4.
 - **A research trace set is calibrated (M3).** 14 of the 19 CRC-2 traces ArchAgent used separate the built-in policies. On them, the built-ins rank as in the literature (SHiP +5.95%, DRRIP +5.73%, SRRIP +5.15% over LRU at 50M + 200M). Evolution will score at 20M + 50M (`crc2-evolve-v1`) and confirm at 50M + 200M (`crc2-validate-v1`).
-- In BUILD_PLAN's terms, phases 0–3 are done, and phase 4 is started (table below). Roadmap milestones M0–M3 are done. M4 is in progress: part A, the modular run specs, is done (job 95745); part B (real fitness) is next.
+- **OpenEvolve evolves with real fitness in one GPU job (M4).** On the 4-trace dev set, 120 iterations across 3 resumed jobs gave 33 distinct fitness values (best 1.1881, about the built-ins' level). A job stopped at its time limit resumes cleanly.
+- **Evolution runs as a staged campaign (M5).** A GPU job writes a whole generation of 24 candidates in under 2 minutes. A CPU array evaluates them, and a small job adds the scores and starts the next generation (`docs/campaigns.md`).
+  - On the dev set, 3 generations ran unattended in 27 minutes: 22 s per iteration against M4's 34 s, with the GPU held a fifth of the time.
+  - A killed task was retried, a cancelled stage resumed, and a persistent failure halted with a clear message.
+- In BUILD_PLAN's terms, phases 0–6 are done (table below). Roadmap milestones M0–M5 are done; M6, hardening for long runs, is next.
 - **Runs are assembled from swappable parts (M4 part A).** A run spec, `configs/runs/<name>.yaml`, names the seed, model profile, prompt profile, search profile and evaluator policy, and one generic job, `slurm/openevolve.sbatch`, runs any spec (`docs/run-specs.md`).
 
 ## Where each BUILD_PLAN phase stands
@@ -18,8 +22,9 @@ As of 2026-10-25. What works, how it was verified, what was measured, and what's
 | 1. Reproducible environment | **Done** | Portable Python and venvs (`.python/`, `env/*-requirements.txt`), records in `env/versions.txt`; `make setup` from a fresh GitHub clone passed (step G) |
 | 2. ChampSim baseline | **Done (M1)** | Pinned `410cee6`, built with static libstdc++. `slurm/baseline.sbatch` ran LRU on HPC3 (job 94177) and wrote validated §3 records to `$AFAR_RESULTS/baselines/`, reproducing coe-hpc1's 43,703 cycles exactly |
 | 3. Standalone evaluator | **Done (M2)** | `evaluator/evaluate_candidate.py`: static checks, a build from the prebuilt base tree, runs under `prlimit`, ROI metrics, the contract's statuses and `geomean_ipc_speedup@1`. Self-test 10/10 on HPC3 (job 94248) |
-| 4. Persistent-controller prototype | **Started** | One GPU job runs vLLM plus OpenEvolve with checkpoints and resume (R6), on the C++ target (R7), with compile-only fitness. **Missing:** OpenEvolve with `champsim_ipc` (M4) |
-| 5–10. CPU arrays, staged generations, campaign state, hardening, observability, islands | Not started | |
+| 4. Persistent-controller prototype | **Done (M4)** | One GPU job runs vLLM plus OpenEvolve with real `champsim_ipc` fitness on the node's CPUs, assembled from a run spec, with resume across jobs and clean time-limit stops (jobs 95745, 95767–95769, 95821–95822) |
+| 5–6. CPU arrays, staged generations | **Done (M5)** | A campaign's GPU job generates a generation, a CPU array evaluates it, and an aggregation job updates OpenEvolve's database and submits the next stage. Stages are idempotent; failed tasks are retried, persistent failures halt, and stopped stages resume (`m5-dev-a`, `-b`, `-c`: jobs 95825–96182) |
+| 7–10. Campaign state, hardening, observability, islands | Next: M6 (phases 7–9), then M7 (phase 10) | |
 
 The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got OpenEvolve working with a GPU-served LLM on this HPC. It covers BUILD_PLAN phases 1–2 and the early parts of 3–4.
 
@@ -33,7 +38,8 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | Fetch and pin LLM assets | `make llm-fetch`, then `sbatch slurm/build_sif.sbatch` | `docs/llm-serving.md` |
 | Serve the model inside a GPU job | `slurm/llm_serve.sh` (GPU preflight, random port and key, health wait, clean stop); tested by `slurm/llm_ping.sbatch` | `docs/llm-serving.md` |
 | Any OpenEvolve run, from a run spec, with resume | `make oe-check SPEC=<name>`, then `sbatch --export=ALL,SPEC=<name> slurm/openevolve.sbatch` (`RESUME=runs/<run>` to continue) | `docs/run-specs.md` |
-| OpenEvolve on a toy / on the ChampSim policy, compile-only | `SPEC=toy-v1` (R6) / `SPEC=champsim-compile-v1` (R7); the old `slurm/openevolve_*.sbatch` are wrappers until M5 | `docs/llm-serving.md`, `docs/champsim-evaluator.md` |
+| OpenEvolve on a toy / on the ChampSim policy, compile-only | `SPEC=toy-v1` (R6) / `SPEC=champsim-compile-v1` (R7) | `docs/llm-serving.md`, `docs/champsim-evaluator.md` |
+| A staged campaign: a GPU job generates, CPU arrays evaluate, a small job aggregates | `make campaign-start SPEC=<name>` on g17; `make campaign-status`, `campaign-stop` or `campaign-resume C=<id>`; `make campaign-selftest` on coe-hpc1 | `docs/campaigns.md` |
 | Evaluate a candidate for real: baseline, candidate file or built-in policy | `sbatch slurm/evaluate.sbatch` (or `python -m evaluator.evaluate_candidate`) | `docs/champsim-evaluator.md` (M2 part B) |
 | Test job scripts without a GPU | `AFAR_LLM_FAKE=1` or the `fake-v1` model profile (plus `AFAR_LLM_FAKE_REPLY=<file>` to replay a real reply) | `docs/llm-serving.md` |
 | Summarize a run | `make oe-summary RUN=runs/<name>-<jobid>` | |
@@ -42,6 +48,9 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 
 | Step | Job(s) | Result |
 |---|---|---|
+| M5 part B: `m5-dev-v1`, 3 generations × 24 candidates, unattended (`m5-dev-a`) | 95825–95890; generation jobs 95827, 95860 (`cs004`), 95887 (`cs001`) | Finished in 27 min with no intervention; every stage ran first time. Of the 72 iterations: 41 `completed`, 8 `compile_failed`, 3 `invalid_candidate`, 16 `runtime_failed`, and 4 rejected as identical to their parent. 4 duplicates shared an evaluation. Best `combined_score` 1.2011, found in generation 1 (M4's best: 1.1881) |
+| M5 part B: a killed task is retried, and a cancelled stage resumes (`m5-dev-b`) | 95915–96182: task 95981_19 and aggregation 96012 cancelled | **Retry:** task 19 of generation 2 was cancelled mid-run. Aggregation resubmitted only that task (job 96006, attempt 2), which completed on `c11`, and generation 3 followed. No node was excluded, since a cancelled task writes no infrastructure marker. A first try (task 95919_3) came too late: that candidate had already finished. **Resume:** generation 3's aggregation (96012) was cancelled while it waited for its array. `make campaign-resume` refused while the array (96011) still ran. Run again once the array was done, it submitted aggregation 96182, which added the generation's 22 programs and finished the campaign. The final checkpoint holds 50 programs (the population cap), iterations 0–72, none repeated. The campaign sat idle for about 3 h 45 min until the resume (issue 12) |
+| M5 part B: a persistent infrastructure failure halts (`m5-dev-c`, a `faults.json` failing generation 1's task 0 on every attempt) | 95944–96004 | Attempt 1 failed on `c20`. Aggregation resubmitted the task with `--exclude=c20`; it failed on `c2`. Then with `--exclude=c2,c20`; it failed on `c6`. The campaign then halted with `halted: infra` and the message "1 of 24 evaluation(s) of generation 1 failed 3 time(s): task 0 (376739fb594257a8): injected by faults.json (attempt 3) on c6", followed by the log directory. It halted 9 min after the start |
 | E2: environment on a CPU node and a GPU node | 90581 (`c8`), 90582 (`cs002`) | All run-time checks pass with no modules |
 | R4: container image built on HPC3 | 91230 (`cpuqs`) | SIF built in 32.6 min; sha256 recorded |
 | R5: vLLM server on an A100 | 93353 (failed: faulty GPU on `cs002`), 93355 (`cs003`) | Healthy in 115 s; OpenEvolve's client reached it |
@@ -72,6 +81,8 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | ChampSim speed, baseline binary | **about 55,000 instructions/s** on `c11` and `c18` (Xeon E5-2660 v4, 2.0 GHz): 6M instructions in 106–109 s. A local trace copy is no faster, so the CPU is the limit, not NFS. At this speed, 50M warmup + 200M simulated instructions would take about 75 min per trace, so simulation length and trace count are the main cost levers for M3–M5 | M1, M2 part A |
 | ChampSim cost per run, by IPC | about 3.1 µs per instruction plus 4.5 µs per simulated cycle (E5-2660 v4): `mcf_46B` (IPC 0.13) 26K instructions/s, `calculix_2670B` (IPC 2.9) 217K/s. Peak RSS about 117 MB | M3 (`docs/trace-calibration.md`) |
 | Real-fitness evolution, one GPU job (`m4-dev-v1`, 3 candidates × 4 CPUs) | Per applied iteration: LLM 13.2 s, evaluation 95.8 s (mean, including fast failures); a completed candidate takes a median 218 s on `cs001`. Wall time 34 s per iteration. Half of the applied rewrites fail; the success rate rose from 9 of 37 in the first job to 21 of 32 in the third, as the population filled with working programs | M4 part B |
+| Staged campaign (`m5-dev-v1`: 24 candidates × 4 CPUs per generation) | 8.6–9.4 min per generation. The GPU job takes 1.7–1.9 min: the server is healthy after 70–75 s, and the 24 batched replies take 17–27 s (one reply took 13.2 s in M4). Evaluation plus aggregation takes 6.9–7.7 min. Over the campaign, 22 s per iteration against 34 s in M4's single job, and the GPU was held about 5.5 of the 27 min | M5 part B |
+| Why candidates crash (`m5-dev-a`, 16 `runtime_failed`) | 10 uncaught `std::out_of_range`, as `.at()` throws on a bad index; 5 ChampSim assertions on the returned way (`set_begin <= way`, `way <= set_end`, `victim < end`); 1 segfault | M5 part B |
 | Node-to-node speed | The same mcf 50M + 200M run took 2.6–4.2 h depending on the node (`homacs3` fastest, `c1` slowest), with identical cycles | M3 |
 | One candidate on `crc2-evolve-v1` (14 traces) | 5.1 CPU-hours; 62 min on 14 CPUs, bound by `mcf_46B`. On `crc2-validate-v1`: 19.2 CPU-hours, 3.7 h | M3 |
 | CRC-2 traces on `/data` | 19 traces, 5.39 GB, 1B instructions each; the folder zip (28 GB) took 37 min and was deleted | M3 |
@@ -86,6 +97,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | vLLM as a sidecar in the same GPU job, from a digest-pinned SIF | Self-contained jobs, with no long-running service to manage | `docs/llm-serving.md` |
 | Qwen2.5-Coder-7B-Instruct, bf16, 16K context | Fits a 40 GB A100 with room for the KV cache; permissive license | `configs/models/qwen2.5-coder-7b-v1.env` |
 | Runs assembled from named, versioned parts (run specs) | The model, prompt, search settings and evaluator policy must be swappable without editing job scripts, and every run must record exactly which parts it used. Settings that depend on other parts (evaluator timeout, code-length cap, CPU budget) are derived, never hand-kept | `docs/run-specs.md` |
+| Evolution as a chain of short jobs (generate on a GPU, evaluate in CPU arrays, aggregate), in plain Slurm with all state in files | Evaluation took 7× the LLM's time in one job, so the GPU sat idle. Short jobs spread evaluation over CPU nodes and hold a GPU only for minutes. Every stage is idempotent, so retries, requeues and resumes are safe | `docs/campaigns.md` |
 | Full rewrites, not diffs | The 7B model ignored the SEARCH/REPLACE format (0/10 applied) | R6 |
 | No top-level LLM seed | vLLM honours the seed, so identical prompts got identical replies | R6 |
 | The evaluator enforces the EVOLVE-BLOCK itself | OpenEvolve 0.4.0's `enforce_evolve_blocks` never reaches its workers | `docs/experiment-contract.md` |
@@ -99,7 +111,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | # | Issue | Effect | Proposed fix | State |
 |---|---|---|---|---|
 | 1 | The seed's header comment ("port of replacement/lru") invites edits outside the block | In job 93495, all 5 `invalid_candidate` results were only this comment | Made policy-neutral: the LRU note now sits inside the block | **Fixed in M1** |
-| 2 | The compile-only stub scores every compiling candidate 1.0 | No fitness signal; OpenEvolve keeps the seed as "best" on ties | `champsim_ipc` (M2) gives real fitness; OpenEvolve runs switch to it in M4 (`evaluator/openevolve_adapter.py`) | **Fixed in M2**; used from M4 |
+| 2 | The compile-only stub scores every compiling candidate 1.0 | No fitness signal; OpenEvolve keeps the seed as "best" on ties | `champsim_ipc` (M2) gives real fitness; OpenEvolve runs switch to it in M4 (`evaluator/openevolve_adapter.py`) | **Fixed in M2**; used since M4 |
 | 3 | `-fsyntax-only` doesn't link | A member declared but never defined passes | `champsim_ipc` builds and links every candidate; the self-test's link-error case gives `compile_failed` | **Fixed in M2** |
 | 4 | Compiler feedback rarely reaches the model | OpenEvolve shows artifacts only to a program's children, and failures score 0 | Accept, or a custom prompt template later | Known |
 | 5 | Which compiler builds candidates on HPC3? | coe-hpc1 built ChampSim and its vcpkg libraries with gcc 12.2; HPC3 nodes have only gcc 11.5 | **Decided 2026-10-23:** the nodes' system gcc 11.5, with no sandbox. **Tested (job 94191):** it builds and links against the gcc-12 libraries, with dynamic libstdc++ | **Resolved** |
@@ -107,8 +119,9 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | 7 | `env/check.sh` requires `AFAR_ASSETS` to be writable | Teammates sharing a read-only copy fail `make check` | `check.sh` accepts a readable copy; `make check` passes `AFAR_ASSETS`/`AFAR_RESULTS` through its clean environment; `llm-fetch` refuses an unwritable one with a clear message | **Fixed in M1** |
 | 8 | pip's cache isn't redirected | `~/.cache/pip` is 3 GB on the 99%-full `/home` (mostly older than this repo) | The Makefile runs pip with `--no-cache-dir`. The existing 3 GB is the user's to delete | **Fixed in M1** |
 | 9 | `cs002` GPU 0 is faulty (73 uncorrectable ECC errors) | Jobs exclude `cs002` and lose its 3 healthy GPUs | Report to HPC support (a note is drafted) | The user's call |
-| 10 | Two near-identical OpenEvolve job scripts | Changes have to be made twice | One generic job, `slurm/openevolve.sbatch SPEC=`; the two old scripts are wrappers until M5 | **Fixed in M4 part A** |
+| 10 | Two near-identical OpenEvolve job scripts | Changes have to be made twice | One generic job, `slurm/openevolve.sbatch SPEC=`; the two old scripts were wrappers until M5 removed them | **Fixed in M4 part A** |
 | 11 | Cycle counts on `smoke-v1` move in 12,000-cycle steps; DRRIP's LLC behaviour differs from LRU's, yet its cycle count is identical (job 94248) | Fitness resolution of about 0.064% on this trace, so small policy differences can read as exactly 1.0 | Check in M3 on LLC-sensitive traces and longer runs: does the step persist, and does DRRIP then differ? If it does, find its cause before trusting small fitness differences. Ruled out so far: warmup (361,901 cycles for every policy) and DRAM refresh (tREF = 32 ms / 8192 = 15,625 core cycles at 4 GHz, not 12,000) | **Closed in M3:** on all 14 admitted traces, policies' cycle counts differ at 1-cycle resolution and DRRIP differs from LRU. The quantum reappears only on near-flat `tonto_2834B` (−36,000 / +12,000 / −48,000), which is excluded. Its cause is still unknown |
+| 12 | Nothing notices a campaign stage that is cancelled, or dies before it runs | The campaign waits for `make campaign-resume`: about 3 h 45 min in the `m5-dev-b` test | M6's `afternotok` handlers and hourly heartbeat resubmit the stage | Planned for M6 |
 
 ## Next steps
 
@@ -124,11 +137,27 @@ The plan to an autonomous, multi-node research system is in **`docs/roadmap.md`*
 - **Evolution length:** L2 (20M + 50M), the flagged fallback: right ranking, but up to 1.5 pp low.
 - **Issues:** 6 fixed, 11 closed.
 - **Baselines:** jobs 95426 and 95440 ran the LRU baselines of `crc2-evolve-v1` and `crc2-validate-v1`. All 28 reproduce the calibration's cycles exactly, across 17 nodes, so results don't depend on the node |
-| M4 Single-job prototype with real fitness | **In progress.**
+| **M4** Single-job prototype with real fitness (issues 2, 10) | **Done (2026-10-26).**
 - **Part A, modular run specs: done (2026-10-25).** On coe-hpc1: the resolver's 21 self-test cases; equivalence with R6/R7's configs, field by field; fake-LLM runs of both specs, a resume and a prompt swap; the policy contract suite. On HPC3, job 95745 ran R7 through the generic job with the same behaviour.
-- **Part B, real fitness: in progress.**
+- **Part B, real fitness: done (2026-10-26).**
   - Done: the dev manifest `crc2-dev-v1` and the spec `m4-dev-v1` (`champsim_ipc`, 3 candidates × 4 CPUs). `champsim_ipc` ran through the generic job locally (fake LLM, `crc2-tiny-v1`).
   - Gate B passed (jobs 95767–95769): fitness varies (33 distinct values), a run resumes across jobs, the cache works across them, and the LLM/evaluation split is measured. `crc2-dev-v1`'s baselines (job 95760) reproduce the calibration's cycles.
   - A job stopped at its time limit with evaluations in flight resumes cleanly (jobs 95821, 95822).
-  - Left: optionally, a first real run on `crc2-evolve-v1` (about 1 h per candidate on 14 CPUs), with its best candidate scored on `crc2-validate-v1` |
-| M5 Staged generations (issue 10) · M6 Long-run hardening · M7 Comparing levers | Planned |
+  - Not run, by choice: a first real run on `crc2-evolve-v1` (about 1 h per candidate on 14 CPUs). It's better done with M5's CPU arrays than on 14 CPUs of a GPU node.
+  - First data on the levers: half of the 7B model's rewrites fail (23 don't compile, 21 break the EVOLVE-BLOCK rules, 7 crash), and evaluation takes about 7× the LLM's time per iteration. |
+| **M5** Staged generations | **Done (2026-10-26).**
+- **Part A, on coe-hpc1:**
+  - `controller/campaign.py`, `executor.py` and `oe_adapter.py`, the three `slurm/campaign_*.sbatch` stages, and `make campaign-*`.
+  - `make campaign-selftest` passes all of Gate A: 3 generations; a retried task; a persistent failure halting with a clear message; a crashed aggregation resumed with no duplicates; `STOP` and resume; duplicates evaluated once; `openevolve-run` continuing from a campaign checkpoint.
+  - One generation ran through the real stage scripts with a stand-in `sbatch`.
+  - The R6/R7 wrapper scripts and `configs/llm/serve.env` are removed.
+- **Part B, on HPC3:** all four acceptance tests passed on `m5-dev-v1` (`crc2-dev-v1`, 3 generations × 24 candidates):
+  - an unattended campaign (`m5-dev-a`, 27 min)
+  - a killed task retried, and a cancelled aggregation resumed (`m5-dev-b`)
+  - a persistent infrastructure failure halted with a clear message (`m5-dev-c`)
+- **First data on the levers:**
+  - Batching works: a generation's 24 replies take about as long as two single replies did in M4.
+  - 16 of `m5-dev-a`'s 72 candidates crashed at run time; 15 of them on an out-of-range index or way.
+- **Moved to M6:** the first real `crc2-evolve-v1` campaign (decided 2026-10-26) |
+| **M6** Long-run hardening | **Next.** `afternotok` handlers and an hourly heartbeat (issue 12), mail on failure, stop conditions and a budget, then the first `crc2-evolve-v1` campaign |
+| M7 Comparing levers | Planned |
