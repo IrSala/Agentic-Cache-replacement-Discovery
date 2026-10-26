@@ -179,6 +179,13 @@ Neither short length met the 0.5 pp rule, so the rule's fallback applies: L2, fl
 
 **The analysis** is in `$AFAR_RESULTS/calibration/crc2-v1-analysis.json`.
 
+**A development manifest (M4):** `crc2-dev-v1` holds 4 admitted traces at 10M + 10M: sphinx3, cactusADM, soplex and omnetpp. `python -m evaluator.calibrate --dev` writes it. These traces were picked because:
+- they have the largest L1 spreads between the built-ins: 58%, 16%, 21% and 8%
+- SHiP, SRRIP and DRRIP are each best on at least one of them
+- every run takes at most 6 min, so a candidate takes about 6 min on 4 CPUs
+
+It's for testing the evolution pipeline, not for claims. `--check-baselines` covers its baselines too.
+
 **Baselines:** the LRU baselines of both manifests ran as arrays (`TARGETS=baseline`) at commit `fa9b49c`:
 
 | Manifest | Job | Wall time | Result |

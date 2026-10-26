@@ -35,6 +35,7 @@ overrides: {}                       # optional dotted OpenEvolve keys, applied l
 |---|---|
 | `toy-v1` | R6: OpenEvolve's function-minimization example with its own evaluator |
 | `champsim-compile-v1` | R7: the ChampSim LLC policy, compile-only fitness |
+| `m4-dev-v1` | M4 part B: real fitness (`champsim_ipc`) on `crc2-dev-v1`, 3 candidates × 4 CPUs, about 6 min per candidate |
 
 ## 2. The parts
 

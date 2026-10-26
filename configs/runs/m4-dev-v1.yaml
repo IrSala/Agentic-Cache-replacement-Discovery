@@ -1,0 +1,18 @@
+# M4 part B: real fitness. champsim_ipc builds and simulates every candidate
+# on the 4-trace dev manifest (about 6 min each on 4 CPUs) and scores its
+# geomean IPC speedup over LRU. Tests that fitness varies, that a run resumes
+# across jobs, and how time splits between the LLM and evaluation.
+#     make oe-check SPEC=m4-dev-v1      (needs crc2-dev-v1's baselines)
+#     sbatch --export=ALL,SPEC=m4-dev-v1 slurm/openevolve.sbatch
+spec_version: 1
+description: M4 part B, champsim_ipc on the 4-trace dev manifest
+seed: seeds/evolved_repl.h
+model: qwen2.5-coder-7b-v1
+prompt: champsim-rewrite-v1
+search: champsim-rewrite-v1
+evaluator:
+  policy: champsim_ipc
+  experiment: crc2-dev-v1
+  parallel_candidates: 3
+  cpus_per_candidate: 4
+iterations: 40

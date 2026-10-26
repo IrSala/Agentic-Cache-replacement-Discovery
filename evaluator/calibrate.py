@@ -3,6 +3,7 @@
     python -m evaluator.calibrate --plan               write the calibration manifests, print the array commands
     python -m evaluator.calibrate --analyze [--write]  report from the records; --write adds the experiment manifests
     python -m evaluator.calibrate --check-baselines    their LRU baselines must reproduce calibration's cycles
+    python -m evaluator.calibrate --dev                write crc2-dev-v1, the M4 development manifest
     python -m evaluator.calibrate --selftest
 
 The calibration manifests (configs/experiments/crc2-cal-<length>-v1.json) hold
@@ -58,6 +59,12 @@ LENGTHS = {
 TINY = (10_000, 10_000, 300)   # crc2-tiny-v1: does every trace load? (seconds, any host)
 REFERENCE, CANDIDATE_LENGTHS = "ref", ("L1", "L2")
 FINAL = (("crc2-evolve-v1", "evolution"), ("crc2-validate-v1", "validation"))
+# crc2-dev-v1 (M4): admitted traces with large spreads between the built-ins at
+# L1 (58%, 16%, 21%, 8%), with SHiP, SRRIP and DRRIP each best on at least one,
+# and runs of at most 6 min, so a candidate takes about 6 min on 4 CPUs. For testing the
+# evolution pipeline, never for claims.
+DEV = ("sphinx3_2520B", "cactusADM_734B", "soplex_66B", "omnetpp_340B")
+DEV_ID, DEV_LENGTH = "crc2-dev-v1", "L1"
 MPKI_MIN, SPREAD_MIN, SPEEDUP_TOLERANCE = 1.0, 0.01, 0.005
 STEP_MIN = 1000
 ARRAY_LIMIT = 40
@@ -279,11 +286,25 @@ def run_analysis(write):
     return 0
 
 
+def write_dev():
+    pin = {t["id"]: t for t in json.loads(PIN.read_text())["traces"]}
+    warmup, sim, _, wall = LENGTHS[DEV_LENGTH]
+    path = write_manifest(manifest_data(
+        DEV_ID, f"M4 development set (docs/run-specs.md): {len(DEV)} admitted CRC-2 traces with large spreads between "
+                f"the built-in policies, at {warmup // 10**6}M + {sim // 10**6}M instructions, so a candidate takes "
+                "minutes. For testing the evolution pipeline; not for claims (use crc2-evolve-v1 and crc2-validate-v1).",
+        [pin[t] for t in DEV], DEV_LENGTH))
+    print(f"-> {path.relative_to(ROOT)}")
+    print(f"LRU baselines, one trace per task. Submit on g17:\n  sbatch --array=0-{len(DEV) - 1}%{ARRAY_LIMIT} --time={wall} "
+          f"--export=ALL,MANIFEST={DEV_ID},TARGETS=baseline slurm/calibrate_array.sbatch")
+    return 0
+
+
 def check_baselines():
     """Each final manifest's LRU baselines must reproduce the calibration's LRU cycles exactly
     (same traces and length, a separate run, usually on other nodes)."""
     root, failures = results_dir(), 0
-    for exp, _ in FINAL:
+    for exp in [e for e, _ in FINAL] + [DEV_ID]:
         data = json.loads((EXPERIMENTS / f"{exp}.json").read_text())
         sim = data["simulation"]
         length = next(l for l, v in LENGTHS.items()
@@ -360,6 +381,7 @@ def main():
     which.add_argument("--analyze", action="store_true")
     which.add_argument("--check-baselines", action="store_true",
                        help="do the final manifests' LRU baselines reproduce the calibration's cycles?")
+    which.add_argument("--dev", action="store_true", help=f"write {DEV_ID}, the M4 development manifest")
     which.add_argument("--selftest", action="store_true")
     parser.add_argument("--write", action="store_true", help="with --analyze: write crc2-evolve-v1 and crc2-validate-v1")
     args = parser.parse_args()
@@ -367,6 +389,8 @@ def main():
         return selftest()
     if args.plan:
         return plan()
+    if args.dev:
+        return write_dev()
     if args.check_baselines:
         return check_baselines()
     return run_analysis(args.write)

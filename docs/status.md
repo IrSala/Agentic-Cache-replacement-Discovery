@@ -123,5 +123,7 @@ The plan to an autonomous, multi-node research system is in **`docs/roadmap.md`*
 - **Baselines:** jobs 95426 and 95440 ran the LRU baselines of `crc2-evolve-v1` and `crc2-validate-v1`. All 28 reproduce the calibration's cycles exactly, across 17 nodes, so results don't depend on the node |
 | M4 Single-job prototype with real fitness | **In progress.**
 - **Part A, modular run specs: done (2026-10-25).** On coe-hpc1: the resolver's 21 self-test cases; equivalence with R6/R7's configs, field by field; fake-LLM runs of both specs, a resume and a prompt swap; the policy contract suite. On HPC3, job 95745 ran R7 through the generic job with the same behaviour.
-- **Part B, real fitness:** next, with `champsim_ipc` on a dev manifest and then `crc2-evolve-v1` (about 1 h per candidate on 14 CPUs) |
+- **Part B, real fitness: in progress.**
+  - Done: the dev manifest `crc2-dev-v1` and the spec `m4-dev-v1` (`champsim_ipc`, 3 candidates × 4 CPUs). `champsim_ipc` ran through the generic job locally (fake LLM, `crc2-tiny-v1`).
+  - Next: `crc2-dev-v1`'s baselines, then a 1 h `m4-dev-v1` job and 2 resumes (Gate B), then optionally `crc2-evolve-v1` (about 1 h per candidate on 14 CPUs) |
 | M5 Staged generations (issue 10) · M6 Long-run hardening · M7 Comparing levers | Planned |
