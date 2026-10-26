@@ -1,0 +1,15 @@
+# Prompt profile: the system message (system_message.txt, here) and any
+# OpenEvolve template overrides (<template name>.txt) for runs that name
+# `prompt: champsim-rewrite-v1`. Immutable once a run uses it; make a -v2.
+description: R7's full-rewrite prompt for the ChampSim LLC policy, with the exact hook signatures and allowed headers
+# What the text assumes; controller/runspec.py checks it against the run's manifest.
+requires:
+  champsim_commit: 410cee62d9c429c043ea611325ce00e6c303be2a
+  module_name: evolved_repl
+# OpenEvolve prompt.* settings. Fewer programs per prompt than the defaults
+# (3 and 2), so the prompt plus max_tokens fits a 16,384-token context.
+openevolve:
+  num_top_programs: 2
+  num_diverse_programs: 1
+  include_artifacts: true      # a parent's compiler errors and status appear in its child's prompt
+  max_artifact_bytes: 8192

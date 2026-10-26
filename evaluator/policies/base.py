@@ -39,6 +39,7 @@ class Context:
     campaign_id: str = None         # both None for baselines
     generation: int = None
     baselines: dict = None          # trace id -> baseline record, for scoring
+    seed: Path = None               # the seed header candidates are checked against (None: seeds/evolved_repl.h)
 
 
 @dataclass
@@ -63,6 +64,16 @@ class Outcome:
 
 class Policy:
     name = None
+    needs_baselines = False         # score() compares against the manifest's LRU baselines
+    needs_simulation = False        # runs ChampSim, so it needs the manifest's traces
+
+    def time_limit_s(self, manifest, cpus):
+        """The longest one evaluation can take before the policy's own limits stop it, in seconds.
+        OpenEvolve's evaluator.timeout is derived from this (controller/runspec.py)."""
+        raise NotImplementedError
+
+    def preflight(self, ctx):
+        """Seconds-long check, before a run starts, that this host can evaluate candidates; raises InfraError."""
 
     def static_check(self, candidate, ctx):
         return None

@@ -243,10 +243,10 @@ This repository applies the guide end to end. See `README.md` for details.
   - `env/modules.sh`: build modules for coe-hpc1 only
   - `env/site.sh`: shared paths for both clusters, no modules
 - **Checks:** `env/check.sh --runtime` checks what jobs need, from either cluster. `slurm/check.sbatch` runs it on an HPC3 CPU node, and `slurm/discover_gpu.sbatch` on an A100 node.
-- **Large assets:** pinned in `configs/llm/serve.env` and fetched by `make llm-fetch` into `/data/cmpe295-bond/$USER/afar`. The container is unpacked on coe-hpc1 and packed into a `.sif` by `slurm/build_sif.sbatch` on HPC3.
+- **Large assets:** pinned in `configs/llm/vllm.env` and the model profiles `configs/models/*.env`, and fetched by `make llm-fetch PROFILE=<name>` into `/data/cmpe295-bond/$USER/afar`. The container is unpacked on coe-hpc1 and packed into a `.sif` by `slurm/build_sif.sbatch` on HPC3.
 - **GPU jobs:**
   - `slurm/llm_serve.sh` runs vLLM inside the job, following the service pattern in section 4.
-  - `slurm/openevolve_*.sbatch` run OpenEvolve against it.
+  - `slurm/openevolve.sbatch SPEC=<run spec>` runs OpenEvolve against it; the spec names the model, prompt, search settings and evaluator (`docs/run-specs.md`).
   - `AFAR_LLM_FAKE=1` tests these scripts on coe-hpc1 against a stand-in server before any GPU time is used.
 - **Verified from scratch:** a fresh clone of the GitHub repo passed `make setup` on coe-hpc1 (392 s) and its CPU and GPU jobs on HPC3 (2026-10-22). `docs/status.md` has the evidence and open issues.
 

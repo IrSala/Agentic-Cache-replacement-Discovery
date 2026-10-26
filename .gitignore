@@ -8,9 +8,9 @@ __pycache__/
 build/
 
 # Experiment outputs (later phases); logs/ exists so sbatch --output can write there
-campaigns/
-results/
-runs/
+/campaigns/
+/results/
+/runs/
 logs/*
 !logs/.gitkeep
 
@@ -18,6 +18,8 @@ logs/*
 *.champsimtrace
 *.champsimtrace.xz
 *.champsimtrace.gz
+*.trace.xz
+*.trace.gz
 
 # Slurm output
 slurm-*.out

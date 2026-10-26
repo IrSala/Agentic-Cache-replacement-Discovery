@@ -13,7 +13,7 @@
 # FORCE=1 re-evaluates targets that already have a summary.
 #
 # Results: $AFAR_RESULTS/baselines/<experiment>/ and
-#          $AFAR_RESULTS/evaluations/<experiment>/<candidate id>/summary.json
+#          $AFAR_RESULTS/evaluations/<experiment>/<policy>/<candidate id>/summary.json
 #
 #SBATCH --job-name=evaluate
 #SBATCH --partition=cpuqs

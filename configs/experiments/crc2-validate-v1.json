@@ -1,0 +1,100 @@
+{
+  "contract_version": 0,
+  "experiment_id": "crc2-validate-v1",
+  "purpose": "M3 validation set (docs/trace-calibration.md): the 14 CRC-2 traces admitted by calibration, at 50M + 200M instructions.",
+  "champsim": {
+    "repo": "https://github.com/ChampSim/ChampSim.git",
+    "commit": "410cee62d9c429c043ea611325ce00e6c303be2a",
+    "base_config": "configs/champsim/baseline.json",
+    "target_cache": "LLC",
+    "module_name": "evolved_repl"
+  },
+  "simulation": {
+    "warmup_instructions": 50000000,
+    "simulation_instructions": 200000000
+  },
+  "baseline": {
+    "policy": "lru"
+  },
+  "traces": [
+    {
+      "id": "GemsFDTD_109B",
+      "path": "traces/crc2/GemsFDTD_109B.trace.xz",
+      "sha256": "5772dabf7376d8ca8af70de77c6ef3c49a6fcf5c9786106660aa65e689159da6"
+    },
+    {
+      "id": "astar_163B",
+      "path": "traces/crc2/astar_163B.trace.xz",
+      "sha256": "51435bb72509be78da0407e0016c3dfd8361558264d5ffe7f17b1ce7d3d05910"
+    },
+    {
+      "id": "bzip2_183B",
+      "path": "traces/crc2/bzip2_183B.trace.xz",
+      "sha256": "de77312f7d467d88f1cb6aee8b1896020021b823d091028de6e1d605cfce9ca5"
+    },
+    {
+      "id": "cactusADM_734B",
+      "path": "traces/crc2/cactusADM_734B.trace.xz",
+      "sha256": "66e7be740ad5d0895462a34e447ecab4674fcf8221333cff3282e5e51f6c0649"
+    },
+    {
+      "id": "gcc_13B",
+      "path": "traces/crc2/gcc_13B.trace.xz",
+      "sha256": "061cf86dffb0f42a6981afedd7cfc8fb83bbd3e9f3d8d31e79881e2381bd6af2"
+    },
+    {
+      "id": "leslie3d_1116B",
+      "path": "traces/crc2/leslie3d_1116B.trace.xz",
+      "sha256": "65c53a6b4136ab0bdb173b6f03db06c9ce1ca7593951b73925ad8d9c0f1f96eb"
+    },
+    {
+      "id": "libquantum_1210B",
+      "path": "traces/crc2/libquantum_1210B.trace.xz",
+      "sha256": "20f5a77c6d72b38779af32d43a92f94e308434567ed0fe05fe7335386c93c3ef"
+    },
+    {
+      "id": "mcf_46B",
+      "path": "traces/crc2/mcf_46B.trace.xz",
+      "sha256": "733e08531e9c48f66d2886ab12a4e7b40c96efa1810e9fb6afc1bf1ae32210bf"
+    },
+    {
+      "id": "milc_360B",
+      "path": "traces/crc2/milc_360B.trace.xz",
+      "sha256": "faed0b187f961c53b985c48fbc551cf75e221c48c5b7ca1fec11aad84b0036c5"
+    },
+    {
+      "id": "omnetpp_340B",
+      "path": "traces/crc2/omnetpp_340B.trace.xz",
+      "sha256": "98180b54f2bedafb0d611dcdc816c8da85117d030e9bc984a963164d39ed0d3b"
+    },
+    {
+      "id": "soplex_66B",
+      "path": "traces/crc2/soplex_66B.trace.xz",
+      "sha256": "31cfcc85c8aec1d3c3ab2c5ae50123efe5176a1cbc528f9a532aee5c6aa62f50"
+    },
+    {
+      "id": "sphinx3_2520B",
+      "path": "traces/crc2/sphinx3_2520B.trace.xz",
+      "sha256": "97f07c069828efd84c78f76d00476593489cf4377dd04e1654e44c1e401c94e5"
+    },
+    {
+      "id": "xalancbmk_748B",
+      "path": "traces/crc2/xalancbmk_748B.trace.xz",
+      "sha256": "d223e1e6a064c202153694232edb6452864827c59e17f7cca7e429044c0ef882"
+    },
+    {
+      "id": "zeusmp_600B",
+      "path": "traces/crc2/zeusmp_600B.trace.xz",
+      "sha256": "cf6229f21948ab23cf2d1f1881ebaa15da7d9b84c4609d0493618b88a9628d69"
+    }
+  ],
+  "limits": {
+    "build_timeout_s": 600,
+    "run_timeout_s": 25200,
+    "max_source_bytes": 32768
+  },
+  "fitness": {
+    "name": "geomean_ipc_speedup",
+    "version": 1
+  }
+}

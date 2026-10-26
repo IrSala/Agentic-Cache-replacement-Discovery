@@ -1,0 +1,19 @@
+# R6 as a run spec: OpenEvolve's function_minimization example with its own
+# Python evaluator, to test the model server, OpenEvolve and resume.
+#     make oe-check SPEC=toy-v1
+#     sbatch --export=ALL,SPEC=toy-v1 slurm/openevolve.sbatch
+spec_version: 1
+description: R6, OpenEvolve's function-minimization example
+seed: examples/function_minimization/initial_program.py
+model: qwen2.5-coder-7b-v1
+prompt: toy-v1
+search: toy-v1
+evaluator:
+  openevolve_file: examples/function_minimization/evaluator.py
+  timeout_s: 60
+  parallel_candidates: 1
+  openevolve:
+    cascade_thresholds: [1.3]
+iterations: 10
+overrides:
+  max_code_length: 20000

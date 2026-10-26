@@ -36,7 +36,7 @@ Candidates are built into ChampSim, run on the manifest's traces, and scored wit
 |---|---|
 | `python -m evaluator.evaluate_candidate --manifest M --baseline` | the LRU baseline for every trace in `M`; candidates are scored against it, so run it first |
 | `… --candidate FILE` / `… --builtin srrip` | evaluate a candidate header, or a built-in ChampSim policy, against that baseline |
-| `evaluator/openevolve_champsim.py` | OpenEvolve's `evaluate(program_path)`. The manifest comes from `AFAR_EXPERIMENT`; see the file for the other variables |
+| `evaluator/openevolve_adapter.py` | OpenEvolve's `evaluate(program_path)` for any registered policy. The policy, manifest, seed and CPUs come from the run's `run.json` (`AFAR_RUN_JSON`), written from a run spec (`docs/run-specs.md`) |
 | `sbatch slurm/evaluate.sbatch` | the same on an HPC3 CPU node; `TARGETS` lists what to run |
 | `make evaluate-selftest` | every status on built and run variants of the seed (coe-hpc1, about 2.5 min) |
 
@@ -103,8 +103,8 @@ Results on `smoke-v1` (1M warmup + 5M simulated instructions):
 |---|---|
 | Seed (header-only port of `replacement/lru` at `410cee6`) | `seeds/evolved_repl.h` |
 | Evaluator (`evaluate(program_path)`) | `evaluator/compile_check.py` |
-| OpenEvolve config, including the system message describing the API | `configs/openevolve/champsim-compile.yaml` |
-| GPU job | `slurm/openevolve_champsim_compile.sbatch` |
+| OpenEvolve config, including the system message describing the API | `configs/openevolve/champsim-compile.yaml` (since M4: the run spec `configs/runs/champsim-compile-v1.yaml`, with the prompt in `configs/prompts/champsim-rewrite-v1/`) |
+| GPU job | `slurm/openevolve_champsim_compile.sbatch` (since M4: `slurm/openevolve.sbatch SPEC=champsim-compile-v1`) |
 | Self-test | `make oe-compile-selftest` (coe-hpc1), or `evaluator/compile_check.py --selftest` (run by the job on the node before the LLM starts) |
 
 ### How OpenEvolve calls it

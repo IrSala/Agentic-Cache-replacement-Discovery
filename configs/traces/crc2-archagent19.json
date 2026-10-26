@@ -1,0 +1,147 @@
+{
+  "source": "CRC-2 (2nd Cache Replacement Championship, 2017) traces: the Dropbox folder linked from ChampSim's README as http://bit.ly/2t2nkUj",
+  "url": "https://www.dropbox.com/sh/hh09tt8myuz0jbp/AACAS5zMWHL7coVuS-RbpUksa?dl=1",
+  "archive": {
+    "name": "CRC2_trace.zip",
+    "bytes": 28072382960,
+    "members": 207
+  },
+  "retrieved": "2026-10-25",
+  "selection": "the 19 memory-intensive SPEC CPU2006 SimPoints evaluated by ArchAgent (arXiv 2602.22425)",
+  "record_bytes": 64,
+  "traces": [
+    {
+      "id": "GemsFDTD_109B",
+      "path": "traces/crc2/GemsFDTD_109B.trace.xz",
+      "bytes": 381052688,
+      "sha256": "5772dabf7376d8ca8af70de77c6ef3c49a6fcf5c9786106660aa65e689159da6",
+      "instructions": 1000000000
+    },
+    {
+      "id": "astar_163B",
+      "path": "traces/crc2/astar_163B.trace.xz",
+      "bytes": 232305540,
+      "sha256": "51435bb72509be78da0407e0016c3dfd8361558264d5ffe7f17b1ce7d3d05910",
+      "instructions": 1000000000
+    },
+    {
+      "id": "bwaves_1861B",
+      "path": "traces/crc2/bwaves_1861B.trace.xz",
+      "bytes": 241255040,
+      "sha256": "3131c109126d072736cc9998a19cffee4c44a411f4acdce1edb061e83b2b885b",
+      "instructions": 1000000000
+    },
+    {
+      "id": "bzip2_183B",
+      "path": "traces/crc2/bzip2_183B.trace.xz",
+      "bytes": 425853048,
+      "sha256": "de77312f7d467d88f1cb6aee8b1896020021b823d091028de6e1d605cfce9ca5",
+      "instructions": 1000000000
+    },
+    {
+      "id": "cactusADM_734B",
+      "path": "traces/crc2/cactusADM_734B.trace.xz",
+      "bytes": 168437244,
+      "sha256": "66e7be740ad5d0895462a34e447ecab4674fcf8221333cff3282e5e51f6c0649",
+      "instructions": 1000000000
+    },
+    {
+      "id": "calculix_2670B",
+      "path": "traces/crc2/calculix_2670B.trace.xz",
+      "bytes": 23210504,
+      "sha256": "233e40f3c92fdb127fc245c3d51c61f1df7e0a8dbbd2d42d82afaa8bbf8ffae4",
+      "instructions": 1000000000
+    },
+    {
+      "id": "gcc_13B",
+      "path": "traces/crc2/gcc_13B.trace.xz",
+      "bytes": 220089564,
+      "sha256": "061cf86dffb0f42a6981afedd7cfc8fb83bbd3e9f3d8d31e79881e2381bd6af2",
+      "instructions": 1000000000
+    },
+    {
+      "id": "lbm_94B",
+      "path": "traces/crc2/lbm_94B.trace.xz",
+      "bytes": 364886140,
+      "sha256": "1ed014c2c3e0502ea9f5b88953f79032788e52720570be0209a1b5427c4b3d8f",
+      "instructions": 1000000000
+    },
+    {
+      "id": "leslie3d_1116B",
+      "path": "traces/crc2/leslie3d_1116B.trace.xz",
+      "bytes": 386983868,
+      "sha256": "65c53a6b4136ab0bdb173b6f03db06c9ce1ca7593951b73925ad8d9c0f1f96eb",
+      "instructions": 1000000000
+    },
+    {
+      "id": "libquantum_1210B",
+      "path": "traces/crc2/libquantum_1210B.trace.xz",
+      "bytes": 167788264,
+      "sha256": "20f5a77c6d72b38779af32d43a92f94e308434567ed0fe05fe7335386c93c3ef",
+      "instructions": 1000000000
+    },
+    {
+      "id": "mcf_46B",
+      "path": "traces/crc2/mcf_46B.trace.xz",
+      "bytes": 795347384,
+      "sha256": "733e08531e9c48f66d2886ab12a4e7b40c96efa1810e9fb6afc1bf1ae32210bf",
+      "instructions": 1000000000
+    },
+    {
+      "id": "milc_360B",
+      "path": "traces/crc2/milc_360B.trace.xz",
+      "bytes": 267284316,
+      "sha256": "faed0b187f961c53b985c48fbc551cf75e221c48c5b7ca1fec11aad84b0036c5",
+      "instructions": 1000000000
+    },
+    {
+      "id": "omnetpp_340B",
+      "path": "traces/crc2/omnetpp_340B.trace.xz",
+      "bytes": 528814608,
+      "sha256": "98180b54f2bedafb0d611dcdc816c8da85117d030e9bc984a963164d39ed0d3b",
+      "instructions": 1000000000
+    },
+    {
+      "id": "soplex_66B",
+      "path": "traces/crc2/soplex_66B.trace.xz",
+      "bytes": 324918436,
+      "sha256": "31cfcc85c8aec1d3c3ab2c5ae50123efe5176a1cbc528f9a532aee5c6aa62f50",
+      "instructions": 1000000000
+    },
+    {
+      "id": "sphinx3_2520B",
+      "path": "traces/crc2/sphinx3_2520B.trace.xz",
+      "bytes": 278623428,
+      "sha256": "97f07c069828efd84c78f76d00476593489cf4377dd04e1654e44c1e401c94e5",
+      "instructions": 1000000000
+    },
+    {
+      "id": "tonto_2834B",
+      "path": "traces/crc2/tonto_2834B.trace.xz",
+      "bytes": 58702880,
+      "sha256": "205226c23730f8a162ad97fc2b92384afbe6c0caad3002d50d9fd13efc224e72",
+      "instructions": 1000000000
+    },
+    {
+      "id": "wrf_1212B",
+      "path": "traces/crc2/wrf_1212B.trace.xz",
+      "bytes": 169821228,
+      "sha256": "7346c119e1f7215df669bb0cfb567e3e9c7039b147f4e1526af16dd7b3cba4b7",
+      "instructions": 1000000000
+    },
+    {
+      "id": "xalancbmk_748B",
+      "path": "traces/crc2/xalancbmk_748B.trace.xz",
+      "bytes": 290213120,
+      "sha256": "d223e1e6a064c202153694232edb6452864827c59e17f7cca7e429044c0ef882",
+      "instructions": 1000000000
+    },
+    {
+      "id": "zeusmp_600B",
+      "path": "traces/crc2/zeusmp_600B.trace.xz",
+      "bytes": 67444868,
+      "sha256": "cf6229f21948ab23cf2d1f1881ebaa15da7d9b84c4609d0493618b88a9628d69",
+      "instructions": 1000000000
+    }
+  ]
+}

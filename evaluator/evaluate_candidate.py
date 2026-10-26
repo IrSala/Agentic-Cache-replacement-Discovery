@@ -3,13 +3,19 @@
     python -m evaluator.evaluate_candidate --manifest configs/experiments/smoke-v1.json --baseline
     python -m evaluator.evaluate_candidate --manifest ... --candidate seeds/evolved_repl.h
     python -m evaluator.evaluate_candidate --manifest ... --builtin srrip
+    python -m evaluator.evaluate_candidate --manifest ... --builtin ship --unscored --trace mcf_46B
     python -m evaluator.evaluate_candidate --selftest
 
 Writes one result record per trace plus summary.json (status, fitness,
 per-trace speedups, build details) to --out, by default
     $AFAR_RESULTS/baselines/<experiment>/                    (--baseline: stock LRU)
-    $AFAR_RESULTS/evaluations/<experiment>/<candidate id>/   (otherwise)
+    $AFAR_RESULTS/calibration/<experiment>/<candidate id>/   (--unscored)
+    $AFAR_RESULTS/evaluations/<experiment>/<policy>/<candidate id>/   (otherwise)
 Candidates are scored against those baselines, so run --baseline first.
+--unscored writes records like a baseline's (no campaign, no fitness), for
+trace calibration (M3). --trace runs one of the manifest's traces, as one
+Slurm array task does; its summary is summary-<trace>.json, so tasks that
+share a directory don't overwrite each other's.
 
 Exit status: 0 for any candidate outcome (a candidate failure is a result),
 1 for an infrastructure failure (contract §5). An evaluation already done for
@@ -27,7 +33,8 @@ from pathlib import Path
 from evaluator import champsim_build as cb
 from evaluator import results
 from evaluator.manifest import Manifest
-from evaluator.policies import Candidate, Context, InfraError, get_policy
+from evaluator.policies import REGISTRY, Candidate, Context, InfraError, get_policy, policy_class
+from evaluator.policies.compile_only import SEED
 
 ROOT = cb.ROOT
 
@@ -73,27 +80,35 @@ def load_baselines(manifest, baseline_dir):
     return found
 
 
-def evaluate(manifest, candidate, *, out_dir, baseline_dir=None, baseline=False, policy="champsim_ipc",
-             campaign_id="manual", generation=0, cxx="g++", jobs=1, keep=False, force=False):
-    """Evaluate and return the summary dict (also written to out_dir/summary.json)."""
+def evaluate(manifest, candidate, *, out_dir, baseline_dir=None, baseline=False, unscored=False, trace=None,
+             policy="champsim_ipc", campaign_id="manual", generation=0, cxx="g++", jobs=1, keep=False, force=False,
+             seed=None):
+    """Evaluate and return the summary dict (also written to out_dir/summary.json,
+    or summary-<trace>.json for one trace)."""
     out_dir = Path(out_dir)
-    summary_path = out_dir / "summary.json"
+    if trace is not None:
+        manifest = manifest.restricted(trace)
+    summary_path = out_dir / (f"summary-{trace}.json" if trace is not None else "summary.json")
+    seed_sha = results.sha256_bytes(Path(seed or SEED).read_bytes())
     if summary_path.exists() and not force:
         old = json.loads(summary_path.read_text())
         if (old.get("experiment_sha256") == manifest.sha256 and old.get("candidate_sha256") == candidate.sha256
-                and old.get("policy") == policy and old.get("status") != "infra_error"):
+                and old.get("policy") == policy and old.get("seed_sha256", seed_sha) == seed_sha
+                and old.get("status") != "infra_error"):
             old["cached"] = True
             return old
 
-    if baseline:
+    if baseline or unscored:
         campaign_id, generation, baselines = None, None, None
-    else:
+    elif policy_class(policy).needs_baselines:
         baselines = load_baselines(manifest, baseline_dir)
+    else:
+        baselines = None
     out_dir.mkdir(parents=True, exist_ok=True)
     workspace = Path(tempfile.mkdtemp(prefix=f"afar-eval-{candidate.candidate_id.replace(':', '-')}-",
                                       dir=os.environ.get("TMPDIR")))
     ctx = Context(manifest=manifest, out_dir=out_dir, workspace=workspace, cxx=cxx, jobs=jobs,
-                  campaign_id=campaign_id, generation=generation, baselines=baselines)
+                  campaign_id=campaign_id, generation=generation, baselines=baselines, seed=seed)
     started = results.now()
     try:
         outcome = get_policy(policy).evaluate(candidate, ctx)
@@ -103,8 +118,9 @@ def evaluate(manifest, candidate, *, out_dir, baseline_dir=None, baseline=False,
     summary = {
         "schema_version": results.SCHEMA_VERSION, "experiment_id": manifest.experiment_id,
         "experiment_sha256": manifest.sha256, "candidate_id": candidate.candidate_id,
-        "candidate_sha256": candidate.sha256, "campaign_id": campaign_id, "generation": generation,
-        "policy": policy, "status": outcome.status, "fitness": outcome.fitness, "reason": outcome.reason,
+        "candidate_sha256": candidate.sha256, "seed_sha256": seed_sha, "campaign_id": campaign_id,
+        "generation": generation, "policy": policy, "status": outcome.status, "fitness": outcome.fitness, "reason": outcome.reason,
+        "metrics": outcome.metrics,
         "speedups": {k[len("speedup_"):]: v for k, v in outcome.metrics.items() if k.startswith("speedup_")},
         "traces": {r["trace_id"]: r["status"] for r in outcome.records},
         "cycles": {r["trace_id"]: r["cycles"] for r in outcome.records},
@@ -116,7 +132,7 @@ def evaluate(manifest, candidate, *, out_dir, baseline_dir=None, baseline=False,
 
 
 def describe(summary):
-    fit = "n/a (baseline)" if summary["fitness"] is None else repr(summary["fitness"])
+    fit = "n/a (unscored)" if summary["fitness"] is None else repr(summary["fitness"])
     build = summary["build"]
     parts = [f"{summary['candidate_id']}: {summary['status']}, fitness {fit}"]
     if build.get("build_seconds") is not None:
@@ -174,6 +190,30 @@ def selftest(cxx, jobs):
                 ok = ok and s["fitness"] == 0.0 and all(v == want for v in s["traces"].values())
             failures += not ok
             print(f"  {'ok  ' if ok else 'FAIL'}  {name:<38} {describe(s)}")
+
+        # One trace, unscored, as a calibration array task runs it.
+        tid = manifest["traces"][0]["id"]
+        s = evaluate(manifest, builtin_candidate("lru"), out_dir=tmp / "calibration", unscored=True, trace=tid, **common)
+        record = json.loads((tmp / "calibration" / f"{tid}.json").read_text())
+        ok = (s["status"] == "completed" and s["fitness"] is None and s["cycles"] == {tid: 43703}
+              and (tmp / "calibration" / f"summary-{tid}.json").exists() and record["campaign_id"] is None
+              and record["experiment_sha256"] == manifest.sha256)
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'}  {'one trace, unscored (array task)':<38} {describe(s)}")
+
+        # The contract every registered policy must meet, so a new policy is tested by being registered.
+        contract = [("seed", seed, "completed"), ("forbidden call", inject('std::system("true");'), "invalid_candidate"),
+                    ("edit outside the block", seed.replace("#include <deque>\n", "#include <list>\n"),
+                     "invalid_candidate"),
+                    ("syntax error", seed.replace("uint64_t cycle = 0;", "uint64_t cycle = 0"), "compile_failed")]
+        for policy in sorted(REGISTRY):
+            for name, text, want in contract:
+                cand = candidate_from_text(text)
+                s = evaluate(manifest, cand, out_dir=tmp / "contract" / policy / cand.candidate_id,
+                             baseline_dir=tmp / "baselines", policy=policy, **common)
+                ok = s["status"] == want and (s["fitness"] == 1.0 if name == "seed" else s["fitness"] == 0.0)
+                failures += not ok
+                print(f"  {'ok  ' if ok else 'FAIL'}  {f'{policy}: {name}':<38} {s['status']}, fitness {s['fitness']}")
     print("evaluate selftest passed" if failures == 0 else f"evaluate selftest FAILED: {failures} case(s)")
     return 1 if failures else 0
 
@@ -186,6 +226,8 @@ def main():
     which.add_argument("--builtin", help="a built-in ChampSim replacement module, evaluated as a candidate")
     which.add_argument("--baseline", action="store_true", help="evaluate the manifest's baseline policy (LRU)")
     which.add_argument("--selftest", action="store_true")
+    parser.add_argument("--unscored", action="store_true", help="records only, no fitness (trace calibration)")
+    parser.add_argument("--trace", metavar="ID", help="run only this trace of the manifest (one array task)")
     parser.add_argument("--out", help="output directory (default under $AFAR_RESULTS)")
     parser.add_argument("--policy", default="champsim_ipc")
     parser.add_argument("--campaign", default="manual")
@@ -200,6 +242,8 @@ def main():
             return selftest(args.cxx, args.jobs)
         if not args.manifest or not (args.candidate or args.builtin or args.baseline):
             parser.error("--manifest with one of --candidate, --builtin, --baseline (or --selftest)")
+        if args.unscored and args.baseline:
+            parser.error("--baseline is already unscored; drop --unscored")
         manifest = Manifest(args.manifest)
         root = results_root()
         baseline_dir = root / "baselines" / manifest.experiment_id
@@ -207,12 +251,15 @@ def main():
             cand, out = baseline_candidate(manifest), args.out or baseline_dir
         else:
             cand = builtin_candidate(args.builtin) if args.builtin else candidate_from_text(Path(args.candidate).read_text())
-            out = args.out or root / "evaluations" / manifest.experiment_id / cand.candidate_id.replace(":", "-")
+            cand_dir = cand.candidate_id.replace(":", "-")
+            out = args.out or (root / "calibration" / manifest.experiment_id / cand_dir if args.unscored
+                               else root / "evaluations" / manifest.experiment_id / args.policy / cand_dir)
         summary = evaluate(manifest, cand, out_dir=out, baseline_dir=baseline_dir, baseline=args.baseline,
-                           policy=args.policy, campaign_id=args.campaign, generation=args.generation,
+                           unscored=args.unscored, trace=args.trace, policy=args.policy,
+                           campaign_id=args.campaign, generation=args.generation,
                            cxx=args.cxx, jobs=args.jobs, keep=args.keep, force=args.force)
         print(describe(summary))
-        print(f"  -> {Path(out) / 'summary.json'}")
+        print(f"  -> {Path(out) / ('summary-' + args.trace + '.json' if args.trace else 'summary.json')}")
         return 0
     except InfraError as e:
         print(f"infra_error: {e}", file=sys.stderr)

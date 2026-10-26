@@ -41,9 +41,17 @@ There is one hand-written JSON file per experiment, `configs/experiments/<experi
 | `limits` | `build_timeout_s`, `run_timeout_s`, `max_source_bytes` |
 | `fitness` | `name: "geomean_ipc_speedup"`, `version` |
 
-**Trace set for now:** `602.gcc_s-1850B` at 1M warmup / 5M simulated instructions, for **plumbing only**. On this trace the LLC hit rate is about 0.3%, and LRU, SRRIP, DRRIP and SHIP land within 0.2% IPC of each other, so fitness is flat.
+**Smoke trace:** `602.gcc_s-1850B` at 1M warmup / 5M simulated instructions (`smoke-v1`), for **plumbing only**. On this trace the LLC hit rate is about 0.3%, and LRU, SRRIP, DRRIP and SHIP land within 0.2% IPC of each other, so fitness is flat.
 
-**Phase 2:** calibrate a set of LLC-sensitive traces (SPEC2017 DPC-3). A trace is admitted only if the built-in policies differ by at least 1% IPC on it.
+**Research trace set (M3, `docs/trace-calibration.md`):** the 19 CRC-2 SPEC CPU2006 SimPoints that ArchAgent used, pinned in `configs/traces/crc2-archagent19.json`. A trace is admitted only if both hold at the 50M + 200M reference length:
+- LRU's demand MPKI is above 1
+- the built-in policies' IPCs differ by at least 1%
+
+Calibration then picks the shortest run length that ranks the built-in policies like the reference does. It writes two manifests:
+- `crc2-evolve-v1`, for evolution: 14 admitted traces at 20M + 50M (2026-10-25). This is the rule's flagged fallback, so it's a screening score.
+- `crc2-validate-v1`, at the reference length: the same 14 at 50M + 200M, where top candidates are confirmed
+
+Records of a single-trace array task (`evaluate_candidate --trace`) carry the full manifest's sha256.
 
 ## 3. Result schema
 
@@ -59,7 +67,7 @@ There is one JSON record per (candidate, trace). Every pair in the manifest gets
     - Demand accesses are LLC `LOAD` + `RFO`. `llc_demand_mpki` = 1000 × demand misses / instructions, and `llc_hit_rate` = demand hits / demand accesses (0.0 if there are none).
   - Records are written to `$AFAR_RESULTS` (`env/site.sh`), atomically (a temporary file, then a rename), with ChampSim's raw log and JSON in `raw/` beside them:
     - `baselines/<experiment>/<trace>.json`: the LRU baseline, built by the same pipeline as candidates (`evaluate_candidate --baseline`)
-    - `evaluations/<experiment>/<candidate id>/`: candidates, plus a `summary.json`
+    - `evaluations/<experiment>/<policy>/<candidate id>/`: candidates, plus a `summary.json`. The policy is part of the path so two policies' results for one candidate never collide; M2's records predate this and sit at `evaluations/<experiment>/<candidate id>/`
     - `reference/<experiment>/`: M1's runs of the coe-hpc1-built binary, a reproducibility check only
 - **Provenance:**
   - `logs`: build log, run log and ChampSim JSON path
