@@ -102,6 +102,18 @@ overrides: {}                       # optional dotted OpenEvolve keys, applied l
 
 The effective system message is identical.
 
+**On HPC3 (job 95745, `cs001`, 2026-10-25):** `champsim-compile-v1` through the generic job behaved like R7 (job 93458):
+
+| | R7, job 93458 | `champsim-compile-v1`, job 95745 |
+|---|---|---|
+| Rewrites applied | 9 of 10 | 10 of 10 |
+| Compiled | 6 | 6 |
+| Edits outside the EVOLVE-BLOCK | 0 | 0 |
+| Seconds per iteration | ~12 | 14.2 |
+
+- All 10 stored prompts carry the profile's system message exactly.
+- `run.json`, `evaluations.jsonl` and checkpoints 1–10 were written.
+
 ## 4. Running
 
 ```bash

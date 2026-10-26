@@ -7,7 +7,7 @@ As of 2026-10-25. What works, how it was verified, what was measured, and what's
 - **Phase 1 is complete.** A fresh clone of the GitHub repo builds on coe-hpc1 with one `make setup`, and runs on COE-HPC3 with no modules. A GPU job serves a pinned 7B model with vLLM next to OpenEvolve, and OpenEvolve evolves the real target: a ChampSim LLC replacement policy in one C++ header.
 - **Candidates can now be scored for real (M2).** `evaluator/evaluate_candidate.py` (the `champsim_ipc` policy) builds a candidate into ChampSim on an HPC3 node, runs the manifest's traces, and scores IPC against LRU. The seed scores exactly 1.0. OpenEvolve runs still use the compile-only policy until M4 switches them over.
 - **A research trace set is calibrated (M3).** 14 of the 19 CRC-2 traces ArchAgent used separate the built-in policies. On them, the built-ins rank as in the literature (SHiP +5.95%, DRRIP +5.73%, SRRIP +5.15% over LRU at 50M + 200M). Evolution will score at 20M + 50M (`crc2-evolve-v1`) and confirm at 50M + 200M (`crc2-validate-v1`).
-- In BUILD_PLAN's terms, phases 0–3 are done, and phase 4 is started (table below). Roadmap milestones M0–M3 are done. M4 is in progress: part A, the modular run specs, passes its checks on coe-hpc1 and needs one HPC3 GPU job; part B (real fitness) follows.
+- In BUILD_PLAN's terms, phases 0–3 are done, and phase 4 is started (table below). Roadmap milestones M0–M3 are done. M4 is in progress: part A, the modular run specs, is done (job 95745); part B (real fitness) is next.
 - **Runs are assembled from swappable parts (M4 part A).** A run spec, `configs/runs/<name>.yaml`, names the seed, model profile, prompt profile, search profile and evaluator policy, and one generic job, `slurm/openevolve.sbatch`, runs any spec (`docs/run-specs.md`).
 
 ## Where each BUILD_PLAN phase stands
@@ -48,6 +48,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | R6: real model on the toy, then resume | 93362 (diff mode: 0/10 applied), 93369, 93386 | Full rewrites applied 9/10; resume continued at iteration 11 |
 | R7: real model on the ChampSim policy | 93458 (`cs004`) | 6 of 9 rewrites compiled; markers kept 9/9 |
 | G: fresh clone of GitHub `main` | setup on coe-hpc1; 93489 (`c19`), 93495 (`cs001`) | Everything reproduced, including smoke at 43,703 cycles; 5 of 10 rewrites compiled |
+| M4 part A: R7 as a run spec through the generic job | 95745 (`cs001`) | 10/10 rewrites applied, 6 compiled, 0 edits outside the block (R7, job 93458: 6 of 9); 14.2 s per iteration (13.4 LLM + 0.8 compile). All 10 stored prompts carry the profile's system message exactly; `run.json` and `evaluations.jsonl` complete; key-leak check clean |
 | M3: LRU baselines of `crc2-evolve-v1` and `crc2-validate-v1` | 95426 (53 min), 95440 (4 h 12 min) | 28/28 reproduce the calibration's LRU cycles exactly; 27 of the 28 pairs ran on different nodes (17 nodes) |
 | M3: trace calibration, 228 runs | 95102 (L1, 15 min), 95199 (L2, 62 min), 95240 (ref, 3 h 53 min); 15 nodes incl. `homacs` | All `completed`, one toolchain, commit `205386c`. 14 of 19 traces admitted; L2 chosen (flagged); issue 11 closed (`docs/trace-calibration.md`) |
 | M2 part B: real evaluator | 94248 (`c11`) | Self-test 10/10 with gcc 11.5. On `smoke-v1`: seed 1.0 exactly, SRRIP 0.99936, SHiP 1.00129, DRRIP 1.0 (see issue 11) |
@@ -121,6 +122,6 @@ The plan to an autonomous, multi-node research system is in **`docs/roadmap.md`*
 - **Issues:** 6 fixed, 11 closed.
 - **Baselines:** jobs 95426 and 95440 ran the LRU baselines of `crc2-evolve-v1` and `crc2-validate-v1`. All 28 reproduce the calibration's cycles exactly, across 17 nodes, so results don't depend on the node |
 | M4 Single-job prototype with real fitness | **In progress.**
-- **Part A, modular run specs:** passes on coe-hpc1. The resolver's 21 self-test cases; equivalence with R6/R7's configs, field by field; fake-LLM runs of both specs, a resume and a prompt swap; the policy contract suite. Needs one HPC3 GPU job (`SPEC=champsim-compile-v1`).
+- **Part A, modular run specs: done (2026-10-25).** On coe-hpc1: the resolver's 21 self-test cases; equivalence with R6/R7's configs, field by field; fake-LLM runs of both specs, a resume and a prompt swap; the policy contract suite. On HPC3, job 95745 ran R7 through the generic job with the same behaviour.
 - **Part B, real fitness:** next, with `champsim_ipc` on a dev manifest and then `crc2-evolve-v1` (about 1 h per candidate on 14 CPUs) |
 | M5 Staged generations (issue 10) · M6 Long-run hardening · M7 Comparing levers | Planned |
