@@ -61,11 +61,20 @@ def best_score(run):
     return None, None
 
 
-def contract_statuses(run):
-    """Program id -> the evaluator's `status` artifact (docs/experiment-contract.md), from the newest checkpoint."""
-    checkpoints = sorted((run / "checkpoints").glob("checkpoint_*"), key=lambda p: int(p.name.split("_")[-1]))
+ARTIFACT_STATUS = re.compile(r"Program (\S+) returned artifacts: \{'status': '(\w+)'")
+
+
+def contract_statuses(run, logs):
+    """Program id -> the evaluator's `status` artifact (docs/experiment-contract.md).
+
+    From the DEBUG log lines the jobs keep, which cover every program; the newest
+    checkpoint holds only the programs still in the population, so it's a fallback."""
     statuses = {}
-    if checkpoints:
+    for log in logs:
+        for match in ARTIFACT_STATUS.finditer(log.read_text(errors="replace")):
+            statuses[match.group(1)] = match.group(2)
+    checkpoints = sorted((run / "checkpoints").glob("checkpoint_*"), key=lambda p: int(p.name.split("_")[-1]))
+    if checkpoints and not statuses:
         for path in (checkpoints[-1] / "programs").glob("*.json"):
             program = json.loads(path.read_text())
             artifacts = json.loads(program.get("artifacts_json") or "{}")
@@ -116,7 +125,7 @@ def main():
                  "(not an OpenEvolve 0.4.0 log?)")
 
     # An evaluator that follows the contract reports a status; prefer it to the metrics.
-    statuses = contract_statuses(args.run)
+    statuses = contract_statuses(args.run, logs)
     for row in rows:
         if row[5] in statuses:
             row[1] = f"applied; {statuses[row[5]]}"

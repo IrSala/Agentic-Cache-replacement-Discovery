@@ -55,6 +55,13 @@ echo "job=${SLURM_JOB_ID} node=$(hostname) date=$(date -Is) commit=$(git rev-par
 echo "spec=${spec} run=${run} cpus=${cpus} CHECKPOINT=${CHECKPOINT:-none} ITERATIONS=${ITERATIONS:-from spec}"
 echo "compiler: AFAR_CXX=${AFAR_CXX} ($("$AFAR_CXX" --version | head -1))"
 
+# Scratch for this job only: candidate build trees, runs and OpenEvolve's temp
+# files go here (they follow TMPDIR), and it is deleted however the job ends, so
+# evaluations cut off by a time limit leave nothing behind on the node.
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/afar-${SLURM_JOB_ID}-XXXXXX")"
+export TMPDIR="$scratch"
+trap 'rm -rf "$scratch"' EXIT
+
 # 1. Validate the spec and every part it names, in seconds and before any GPU
 #    work; it prints the parts to the log and the job's variables (AFAR_RUN_*) here.
 vars="$("$py" -m controller.runspec --check "$spec" --cpus "$cpus" --shell)"
@@ -73,6 +80,7 @@ source "$AFAR_RUN_MODEL_PROFILE"
 source slurm/llm_serve.sh
 llm_gpu_preflight
 llm_start
+trap 'llm_stop; rm -rf "$scratch"' EXIT     # llm_start set EXIT to llm_stop alone
 llm_wait_ready 900
 
 # 4. The resolved config, now that the server's address is known; run.json
@@ -80,21 +88,26 @@ llm_wait_ready 900
 "$py" -m controller.runspec --resolve "$spec" --run-dir "$run" --api-base "$AFAR_LLM_API_BASE" --cpus "$cpus"
 export AFAR_RUN_JSON="${PWD}/${run}/run.json"
 
+# 6. (Defined first: step 5's trap calls it.) After OpenEvolve, however it
+#    ended: DEBUG logs hold every request, so check the key did not end up
+#    in them (it reaches grep through a pipe, never a command line), then
+#    summarize the run.
+finish() {
+    if grep -rqF -f <(printf '%s\n' "$AFAR_LLM_API_KEY") "$run/logs" "$run/resolved" "$AFAR_LLM_LOG"; then
+        echo "WARNING: the API key appears in ${run}/logs, ${run}/resolved or ${AFAR_LLM_LOG}" >&2
+    fi
+    "$py" scripts/oe_run_summary.py "$run" || true
+}
+
 # 5. OpenEvolve, in the background with wait, so a SIGTERM from --signal reaches
 #    the trap promptly. --signal=B: signals only this shell, so the trap passes it
-#    on: OpenEvolve then stops its workers and saves best/ before the server stops.
+#    on: OpenEvolve cancels the evaluations in flight and saves best/; the run
+#    continues later from its newest checkpoint (RESUME=).
 .venv/controller/bin/openevolve-run "$AFAR_RUN_SEED" "$AFAR_RUN_EVALUATOR_FILE" \
     --config "${run}/resolved/config.yaml" --output "$run" --log-level DEBUG \
     ${ITERATIONS:+--iterations "$ITERATIONS"} ${CHECKPOINT:+--checkpoint "$CHECKPOINT"} &
 oe_pid=$!
-trap 'echo "job: received SIGTERM, stopping OpenEvolve"; kill -TERM "$oe_pid" 2>/dev/null || true; wait "$oe_pid" || true; exit 143' TERM
+trap 'echo "job: received SIGTERM, stopping OpenEvolve"; kill -TERM "$oe_pid" 2>/dev/null || true; wait "$oe_pid" || true; finish; echo "stopped; continue with RESUME=${run}"; exit 143' TERM
 wait "$oe_pid"
-
-# DEBUG logs hold every request, so check the key did not end up in them. The
-# key reaches grep through a pipe (printf is a builtin), never a command line.
-if grep -rqF -f <(printf '%s\n' "$AFAR_LLM_API_KEY") "$run/logs" "$run/resolved" "$AFAR_LLM_LOG"; then
-    echo "WARNING: the API key appears in ${run}/logs, ${run}/resolved or ${AFAR_LLM_LOG}" >&2
-fi
-
-"$py" scripts/oe_run_summary.py "$run"
+finish
 echo "done"

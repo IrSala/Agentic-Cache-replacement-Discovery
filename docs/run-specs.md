@@ -146,6 +146,14 @@ sbatch --exclude=cs002 --export=ALL,SPEC=champsim-compile-v1,RESUME=runs/champsi
 
 `ITERATIONS=N` overrides the spec's count; after a checkpoint, it counts from there. The job requests 16 CPUs and 32 GB by default; override with sbatch options.
 
+**At the time limit:**
+1. Slurm sends SIGTERM 60 s early (`--signal=B:TERM@60`), and the job passes it to OpenEvolve.
+2. OpenEvolve cancels the evaluations in flight, saves `best/` and stops. Its newest checkpoint is the last completed iteration, since OpenEvolve 0.4.0 saves none on SIGTERM.
+3. The job runs the key-leak check and the summary, prints `stopped; continue with RESUME=<run>` and exits 143.
+4. Candidates' scratch directories live in a job-scoped `TMPDIR`, deleted however the job ends.
+
+Jobs 95821 and 95822 tested this: a stop with 3 evaluations in flight, then a clean resume from `checkpoint_144`. To chain jobs, use `--dependency=afterany:<previous job>`, not `afterok`, which never fires after a time-limit stop.
+
 **What a run writes in `runs/<spec>-<jobid>/`:**
 - `resolved/config.yaml` and `resolved/prompt/`
 - `run.json`: the parts, every input's sha256, the resolved config's sha256, the commits, and each job
