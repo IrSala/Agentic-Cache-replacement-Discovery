@@ -2,6 +2,7 @@
 
     python -m evaluator.calibrate --plan               write the calibration manifests, print the array commands
     python -m evaluator.calibrate --analyze [--write]  report from the records; --write adds the experiment manifests
+    python -m evaluator.calibrate --check-baselines    their LRU baselines must reproduce calibration's cycles
     python -m evaluator.calibrate --selftest
 
 The calibration manifests (configs/experiments/crc2-cal-<length>-v1.json) hold
@@ -56,6 +57,7 @@ LENGTHS = {
 }
 TINY = (10_000, 10_000, 300)   # crc2-tiny-v1: does every trace load? (seconds, any host)
 REFERENCE, CANDIDATE_LENGTHS = "ref", ("L1", "L2")
+FINAL = (("crc2-evolve-v1", "evolution"), ("crc2-validate-v1", "validation"))
 MPKI_MIN, SPREAD_MIN, SPEEDUP_TOLERANCE = 1.0, 0.01, 0.005
 STEP_MIN = 1000
 ARRAY_LIMIT = 40
@@ -258,14 +260,54 @@ def run_analysis(write):
     print(f"\n-> {out}")
     if write:
         keep = [t for t in pin["traces"] if t["id"] in result["admitted"]]
-        for exp, length, role in (("crc2-evolve-v1", result["chosen"], "evolution"),
-                                  ("crc2-validate-v1", REFERENCE, "validation")):
-            warmup, sim = LENGTHS[length][:2]
+        flag = (f" {result['chosen']} is the fallback, flagged: it ranks the built-in policies like the reference but "
+                f"misses their suite speedups by more than {100 * SPEEDUP_TOLERANCE:.1f} pp, so confirm top "
+                "candidates on crc2-validate-v1.") if result["flagged"] else ""
+        lengths = {"crc2-evolve-v1": result["chosen"], "crc2-validate-v1": REFERENCE}
+        for exp, role in FINAL:
+            warmup, sim = LENGTHS[lengths[exp]][:2]
             path = write_manifest(manifest_data(
                 exp, f"M3 {role} set (docs/trace-calibration.md): the {len(keep)} CRC-2 traces admitted by "
-                     f"calibration, at {warmup // 10**6}M + {sim // 10**6}M instructions.", keep, length))
+                     f"calibration, at {warmup // 10**6}M + {sim // 10**6}M instructions."
+                     + (flag if role == "evolution" else ""), keep, lengths[exp]))
             print(f"-> {path.relative_to(ROOT)}")
+        print(f"\nLRU baselines, one trace per task. Submit on g17:")
+        for exp, _ in FINAL:
+            print(f"  sbatch --array=0-{len(keep) - 1}%{ARRAY_LIMIT} --time={LENGTHS[lengths[exp]][3]} "
+                  f"--export=ALL,MANIFEST={exp},TARGETS=baseline slurm/calibrate_array.sbatch")
+        print("then: python -m evaluator.calibrate --check-baselines")
     return 0
+
+
+def check_baselines():
+    """Each final manifest's LRU baselines must reproduce the calibration's LRU cycles exactly
+    (same traces and length, a separate run, usually on other nodes)."""
+    root, failures = results_dir(), 0
+    for exp, _ in FINAL:
+        data = json.loads((EXPERIMENTS / f"{exp}.json").read_text())
+        sim = data["simulation"]
+        length = next(l for l, v in LENGTHS.items()
+                      if v[:2] == (sim["warmup_instructions"], sim["simulation_instructions"]))
+        same, problems = 0, []
+        for t in data["traces"]:
+            base = root / "baselines" / exp / f"{t['id']}.json"
+            cal = root / "calibration" / cal_id(length) / "builtin-lru" / f"{t['id']}.json"
+            if not base.exists():
+                problems.append(f"{t['id']}: no baseline")
+                continue
+            b, c = json.loads(base.read_text()), json.loads(cal.read_text())
+            if b["status"] != "completed":
+                problems.append(f"{t['id']}: baseline {b['status']}")
+            elif (b["cycles"], b["instructions"]) != (c["cycles"], c["instructions"]):
+                problems.append(f"{t['id']}: {b['cycles']:,} cycles on {b['env']['hostname']}, "
+                                f"{c['cycles']:,} in calibration on {c['env']['hostname']}")
+            else:
+                same += 1
+        failures += len(problems)
+        print(f"{exp} ({length}): {same}/{len(data['traces'])} baselines reproduce the calibration's LRU cycles exactly")
+        for p in problems:
+            print(f"  FAIL  {p}")
+    return 1 if failures else 0
 
 
 # --- selftest ---------------------------------------------------------------
@@ -316,6 +358,8 @@ def main():
     which = parser.add_mutually_exclusive_group(required=True)
     which.add_argument("--plan", action="store_true")
     which.add_argument("--analyze", action="store_true")
+    which.add_argument("--check-baselines", action="store_true",
+                       help="do the final manifests' LRU baselines reproduce the calibration's cycles?")
     which.add_argument("--selftest", action="store_true")
     parser.add_argument("--write", action="store_true", help="with --analyze: write crc2-evolve-v1 and crc2-validate-v1")
     args = parser.parse_args()
@@ -323,6 +367,8 @@ def main():
         return selftest()
     if args.plan:
         return plan()
+    if args.check_baselines:
+        return check_baselines()
     return run_analysis(args.write)
 
 

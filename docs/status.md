@@ -6,7 +6,8 @@ As of 2026-10-25. What works, how it was verified, what was measured, and what's
 
 - **Phase 1 is complete.** A fresh clone of the GitHub repo builds on coe-hpc1 with one `make setup`, and runs on COE-HPC3 with no modules. A GPU job serves a pinned 7B model with vLLM next to OpenEvolve, and OpenEvolve evolves the real target: a ChampSim LLC replacement policy in one C++ header.
 - **Candidates can now be scored for real (M2).** `evaluator/evaluate_candidate.py` (the `champsim_ipc` policy) builds a candidate into ChampSim on an HPC3 node, runs the manifest's traces, and scores IPC against LRU. The seed scores exactly 1.0. OpenEvolve runs still use the compile-only policy until M4 switches them over.
-- In BUILD_PLAN's terms, phases 0–3 are done, and phase 4 is started (table below). Roadmap milestones M0–M2 are done; M3 (trace calibration) is in progress.
+- **A research trace set is calibrated (M3).** 14 of the 19 CRC-2 traces ArchAgent used separate the built-in policies. On them, the built-ins rank as in the literature (SHiP +5.95%, DRRIP +5.73%, SRRIP +5.15% over LRU at 50M + 200M). Evolution will score at 20M + 50M (`crc2-evolve-v1`) and confirm at 50M + 200M (`crc2-validate-v1`).
+- In BUILD_PLAN's terms, phases 0–3 are done, and phase 4 is started (table below). Roadmap milestones M0–M2 are done. M3 is done except for its two LRU-baseline arrays.
 
 ## Where each BUILD_PLAN phase stands
 
@@ -46,6 +47,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | R6: real model on the toy, then resume | 93362 (diff mode: 0/10 applied), 93369, 93386 | Full rewrites applied 9/10; resume continued at iteration 11 |
 | R7: real model on the ChampSim policy | 93458 (`cs004`) | 6 of 9 rewrites compiled; markers kept 9/9 |
 | G: fresh clone of GitHub `main` | setup on coe-hpc1; 93489 (`c19`), 93495 (`cs001`) | Everything reproduced, including smoke at 43,703 cycles; 5 of 10 rewrites compiled |
+| M3: trace calibration, 228 runs | 95102 (L1, 15 min), 95199 (L2, 62 min), 95240 (ref, 3 h 53 min); 15 nodes incl. `homacs` | All `completed`, one toolchain, commit `205386c`. 14 of 19 traces admitted; L2 chosen (flagged); issue 11 closed (`docs/trace-calibration.md`) |
 | M2 part B: real evaluator | 94248 (`c11`) | Self-test 10/10 with gcc 11.5. On `smoke-v1`: seed 1.0 exactly, SRRIP 0.99936, SHiP 1.00129, DRRIP 1.0 (see issue 11) |
 | M2 part A: toolchain test | 94191 (`c18`) | gcc 11.5 builds and links; LRU, seed and SRRIP give 43,703 cycles; the gcc 11.5 build gives `smoke-v1`'s 18,624,235 cycles, the same as gcc 12 |
 | M1: LRU baselines in Slurm | 94177 (`c11`) | `smoke-tiny-v1`: 43,703 cycles, the same as coe-hpc1. `smoke-v1`: 18,624,235 cycles, IPC 0.2685, LLC demand MPKI 17.80, hit rate 0.11%. Both records validate |
@@ -64,6 +66,7 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | Largest prompt | 7,204 tokens (toy), 4,003 (C++) | R6, G |
 | ChampSim speed, baseline binary | **about 55,000 instructions/s** on `c11` and `c18` (Xeon E5-2660 v4, 2.0 GHz): 6M instructions in 106–109 s. A local trace copy is no faster, so the CPU is the limit, not NFS. At this speed, 50M warmup + 200M simulated instructions would take about 75 min per trace, so simulation length and trace count are the main cost levers for M3–M5 | M1, M2 part A |
 | ChampSim cost per run, by IPC | about 3.1 µs per instruction plus 4.5 µs per simulated cycle (E5-2660 v4): `mcf_46B` (IPC 0.13) 26K instructions/s, `calculix_2670B` (IPC 2.9) 217K/s. Peak RSS about 117 MB | M3 (`docs/trace-calibration.md`) |
+| One candidate on `crc2-evolve-v1` (14 traces) | 5.1 CPU-hours; 62 min on 14 CPUs, bound by `mcf_46B`. On `crc2-validate-v1`: 19.2 CPU-hours, 3.7 h | M3 |
 | CRC-2 traces on `/data` | 19 traces, 5.39 GB, 1B instructions each; the folder zip (28 GB) took 37 min and was deleted | M3 |
 | Candidate build on an HPC3 node (gcc 11.5, `-j4`) | full build 53.3 s; after copying a built tree, 10.5 s (2 objects recompiled) | M2 part A |
 
@@ -79,6 +82,8 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | No top-level LLM seed | vLLM honours the seed, so identical prompts got identical replies | R6 |
 | The evaluator enforces the EVOLVE-BLOCK itself | OpenEvolve 0.4.0's `enforce_evolve_blocks` never reaches its workers | `docs/experiment-contract.md` |
 | A compile check that `static_assert`s ChampSim's hook detection | A hook with the wrong signature otherwise compiles and is silently never called | `docs/champsim-evaluator.md` |
+| ArchAgent's 19 CRC-2 traces, calibrated under pre-set rules | Comparable with published work; the rules were fixed before any result, so they couldn't be tuned to it | `docs/trace-calibration.md` |
+| Evolve at 20M + 50M, confirm at 50M + 200M | No short length met the ±0.5 pp rule. L2 ranks the policies correctly at a quarter of the reference's cost, so it's the rule's flagged fallback (chosen 2026-10-25 over testing 50M + 100M) | `docs/trace-calibration.md` §4 |
 | `--mem=24G` for the GPU jobs | Measured peak is 4.2 GB; 64G left jobs waiting for memory while GPUs were free | `docs/llm-serving.md` |
 
 ## Open issues
@@ -90,12 +95,12 @@ The repo's own "Phase 1" was a ladder of steps (E1, E2, R2–R7, G) that got Ope
 | 3 | `-fsyntax-only` doesn't link | A member declared but never defined passes | `champsim_ipc` builds and links every candidate; the self-test's link-error case gives `compile_failed` | **Fixed in M2** |
 | 4 | Compiler feedback rarely reaches the model | OpenEvolve shows artifacts only to a program's children, and failures score 0 | Accept, or a custom prompt template later | Known |
 | 5 | Which compiler builds candidates on HPC3? | coe-hpc1 built ChampSim and its vcpkg libraries with gcc 12.2; HPC3 nodes have only gcc 11.5 | **Decided 2026-10-23:** the nodes' system gcc 11.5, with no sandbox. **Tested (job 94191):** it builds and links against the gcc-12 libraries, with dynamic libstdc++ | **Resolved** |
-| 6 | The only trace is a smoke trace with flat fitness | LRU, SRRIP, DRRIP and SHiP land within 0.2% IPC on it | Calibrate LLC-sensitive traces (contract §2) | Open |
+| 6 | The only trace is a smoke trace with flat fitness | LRU, SRRIP, DRRIP and SHiP land within 0.2% IPC on it | Calibrated 14 LLC-sensitive CRC-2 traces, with spreads of 1.1–63% between the built-ins (`crc2-evolve-v1`, `crc2-validate-v1`) | **Fixed in M3** |
 | 7 | `env/check.sh` requires `AFAR_ASSETS` to be writable | Teammates sharing a read-only copy fail `make check` | `check.sh` accepts a readable copy; `make check` passes `AFAR_ASSETS`/`AFAR_RESULTS` through its clean environment; `llm-fetch` refuses an unwritable one with a clear message | **Fixed in M1** |
 | 8 | pip's cache isn't redirected | `~/.cache/pip` is 3 GB on the 99%-full `/home` (mostly older than this repo) | The Makefile runs pip with `--no-cache-dir`. The existing 3 GB is the user's to delete | **Fixed in M1** |
 | 9 | `cs002` GPU 0 is faulty (73 uncorrectable ECC errors) | Jobs exclude `cs002` and lose its 3 healthy GPUs | Report to HPC support (a note is drafted) | The user's call |
 | 10 | Two near-identical OpenEvolve job scripts | Changes have to be made twice | A shared helper once a third script appears | Deferred |
-| 11 | Cycle counts on `smoke-v1` move in 12,000-cycle steps; DRRIP's LLC behaviour differs from LRU's, yet its cycle count is identical (job 94248) | Fitness resolution of about 0.064% on this trace, so small policy differences can read as exactly 1.0 | Check in M3 on LLC-sensitive traces and longer runs: does the step persist, and does DRRIP then differ? If it does, find its cause before trusting small fitness differences. Ruled out so far: warmup (361,901 cycles for every policy) and DRAM refresh (tREF = 32 ms / 8192 = 15,625 core cycles at 4 GHz, not 12,000) | Open; M3 measures it on 19 traces × 3 lengths |
+| 11 | Cycle counts on `smoke-v1` move in 12,000-cycle steps; DRRIP's LLC behaviour differs from LRU's, yet its cycle count is identical (job 94248) | Fitness resolution of about 0.064% on this trace, so small policy differences can read as exactly 1.0 | Check in M3 on LLC-sensitive traces and longer runs: does the step persist, and does DRRIP then differ? If it does, find its cause before trusting small fitness differences. Ruled out so far: warmup (361,901 cycles for every policy) and DRAM refresh (tREF = 32 ms / 8192 = 15,625 core cycles at 4 GHz, not 12,000) | **Closed in M3:** on all 14 admitted traces, policies' cycle counts differ at 1-cycle resolution and DRRIP differs from LRU. The quantum reappears only on near-flat `tonto_2834B` (−36,000 / +12,000 / −48,000), which is excluded. Its cause is still unknown |
 
 ## Next steps
 
@@ -106,6 +111,10 @@ The plan to an autonomous, multi-node research system is in **`docs/roadmap.md`*
 | **M0** HPC3 capability check | **Done (2026-10-23).** Jobs can submit jobs; `scrontab` is disabled, so the watchdog uses `afternotok` handlers plus a `--begin` heartbeat; `MaxArraySize` is 1001; `JobRequeue=1`; `/bin/mail` is available |
 | **M1** Baseline in Slurm, result schema, manifest v1, and issues 1, 7 and 8 | **Done (2026-10-23).** Job 94177 reproduced 43,703 cycles on HPC3 and wrote validated `smoke-v1` baselines. Issues 1, 7 and 8 are fixed |
 | **M2** Real evaluator (resolves issues 2, 3 and 5) | **Done (2026-10-23).** Part A: job 94191. Part B (job 94248): the `champsim_ipc` evaluator with a prebuilt base tree. The self-test passes 10/10 on HPC3; on `smoke-v1` the seed's fitness is exactly 1.0, SRRIP 0.99936, SHiP 1.00129, and DRRIP 1.0 (its LLC behaviour differs, but its cycle count is identical). Cycle counts move in 12,000-cycle steps on this trace; that's to check in M3 |
-| **M3** Trace calibration (issue 6) | **In progress.** The 19 CRC-2 traces ArchAgent used, calibrated at 10M+10M, 20M+50M and 50M+200M with the four built-in policies, as Slurm arrays (`docs/trace-calibration.md`). Also checks issue 11 (12,000-cycle steps; DRRIP the same as LRU) |
+| **M3** Trace calibration (issue 6) | **Calibrated (2026-10-25); baselines pending.** The 19 CRC-2 traces ArchAgent used were run at 10M + 10M, 20M + 50M and 50M + 200M with the four built-in policies: 228 runs, as the project's first Slurm arrays (jobs 95102, 95199, 95240).
+- **Admitted:** 14 traces.
+- **Evolution length:** L2 (20M + 50M), the flagged fallback: right ranking, but up to 1.5 pp low.
+- **Issues:** 6 fixed, 11 closed.
+- **Left:** the LRU baselines of `crc2-evolve-v1` and `crc2-validate-v1`, which must reproduce the calibration's cycles exactly |
 | M4 Single-job prototype with real fitness | Planned |
 | M5 Staged generations (issue 10) · M6 Long-run hardening · M7 Comparing levers | Planned |

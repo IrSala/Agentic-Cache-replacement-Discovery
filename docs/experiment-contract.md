@@ -48,8 +48,8 @@ There is one hand-written JSON file per experiment, `configs/experiments/<experi
 - the built-in policies' IPCs differ by at least 1%
 
 Calibration then picks the shortest run length that ranks the built-in policies like the reference does. It writes two manifests:
-- `crc2-evolve-v1`, for evolution
-- `crc2-validate-v1`, at the reference length
+- `crc2-evolve-v1`, for evolution: 14 admitted traces at 20M + 50M (2026-10-25). This is the rule's flagged fallback, so it's a screening score.
+- `crc2-validate-v1`, at the reference length: the same 14 at 50M + 200M, where top candidates are confirmed
 
 Records of a single-trace array task (`evaluate_candidate --trace`) carry the full manifest's sha256.
 

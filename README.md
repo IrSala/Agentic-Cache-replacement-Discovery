@@ -6,7 +6,7 @@ A reproducible OpenEvolve + ChampSim environment for SJSU CoE HPC. It is the fou
 - A fresh clone builds on coe-hpc1 with `make setup` and runs on COE-HPC3 with no modules.
 - One GPU job serves a pinned 7B model with vLLM next to OpenEvolve, which evolves a ChampSim LLC replacement policy.
 - The real evaluator builds each candidate into ChampSim, simulates the manifest's traces and scores IPC against LRU ([docs/experiment-contract.md](docs/experiment-contract.md)).
-- M3 calibrates the 19 CRC-2 traces ArchAgent used, as Slurm arrays ([docs/trace-calibration.md](docs/trace-calibration.md)).
+- M3 calibrated the 19 CRC-2 traces ArchAgent used, in Slurm arrays. 14 traces separate the policies, giving `crc2-evolve-v1` (20M + 50M) and `crc2-validate-v1` (50M + 200M) ([docs/trace-calibration.md](docs/trace-calibration.md)).
 
 ## Two clusters, one workflow
 
@@ -195,7 +195,7 @@ slurm/                          batch jobs (submit from the repo root on g17)
 configs/champsim/baseline.json  ChampSim configuration for baseline builds
 configs/llm/serve.env           pinned vLLM image and model (names, digests, revisions)
 configs/openevolve/             OpenEvolve configs: toy.yaml, toy-manual.yaml, champsim-compile.yaml
-configs/experiments/           experiment manifests (contract §2): smoke-*, crc2-tiny-v1, crc2-cal-{L1,L2,ref}-v1
+configs/experiments/           experiment manifests (contract §2): smoke-*, crc2-tiny-v1, crc2-cal-{L1,L2,ref}-v1, crc2-evolve-v1, crc2-validate-v1
 configs/traces/                 pinned trace sets: crc2-archagent19.json (sha256, size, instructions) and the CRC-2 zip's member list
 seeds/evolved_repl.h            the seed candidate: a header-only port of ChampSim's LRU
 evaluator/                      candidate evaluation (a Python package; standard library only, except compile_check.py)
