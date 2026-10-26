@@ -1,0 +1,24 @@
+# M6 part B: the watchdog's tests on HPC3 (docs/campaigns.md, sections 5-6). As
+# m5-dev-v1, on the 4-trace dev manifest, but 2 generations and a test spec, so the
+# heartbeat may check every 10 min instead of hourly. Each test campaign writes its
+# own faults.json, or has jobs cancelled by hand.
+#     make oe-check SPEC=m6-dev-v1
+#     make campaign-start SPEC=m6-dev-v1 NAME=<id>      (on g17)
+spec_version: 1
+description: M6, watchdog tests on the 4-trace dev manifest
+seed: seeds/evolved_repl.h
+model: qwen2.5-coder-7b-v1
+prompt: champsim-rewrite-v1
+search: champsim-rewrite-v1
+evaluator:
+  policy: champsim_ipc
+  experiment: crc2-dev-v1
+  cpus_per_candidate: 4
+campaign:
+  generations: 2
+  candidates_per_generation: 24   # 8 per island with the search profile's 3 islands
+  max_concurrent_tasks: 40
+  max_task_retries: 2
+  max_stage_retries: 2
+  test: true
+  heartbeat_minutes: 10

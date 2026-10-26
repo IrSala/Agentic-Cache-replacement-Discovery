@@ -71,6 +71,7 @@ HEARTBEAT_RESOURCES = {"partition": "cpuqs", "cpus-per-task": 1, "mem": "1G", "t
 EVALUATE_MARGIN_S = 600          # above the policy's own worst case: queue-free start-up, copying, writing
 STALL_GRACE_S = 600              # the heartbeat restarts a chain only once status.json is this old
 NAMED_WAIT_S = 60                # a job can start before its submitter records it: how long it waits to be named
+NODE_FAULT_EXIT = "3"            # a generation job's exit status when its node looks unusable (campaign_generate.sbatch)
 # FAULTS (tests only): faults.json = {"infra": [{"generation": g, "index": i, "attempts": [1] or "all"}],
 #     "generate_fail": [{"generation": g, "attempts": [1]}], "aggregate_crash": [g, or {"generation": g, "attempts": [1]}],
 #     "aggregate_crash_after_save": [g, ...]}. attempts count a stage's job restarts (stage_attempt).
@@ -286,7 +287,11 @@ def generate(c, g, api_base=None, needs_llm=False, job=None):
     current = st["state"] == "running" and st["stage"] == "generating" and st["generation"] == g
     if current and not c.named("stage_job", job or os.environ.get("SLURM_JOB_ID")):
         return 1 if needs_llm else 0
-    if current and not done and fault_hit(c, "generate_fail", g, st.get("stage_attempt", 1)):
+    fault = fault_hit(c, "generate_fail", g, st.get("stage_attempt", 1)) if current and not done else None
+    if fault and fault.get("exit"):      # as the job script exits when a node check fails
+        print(f"injected by faults.json: the generation job of generation {g} exits {fault['exit']}", file=sys.stderr)
+        return int(fault["exit"])
+    if fault:
         raise CampaignError(f"injected by faults.json: the generation job of generation {g} failed")
     if needs_llm:                                  # does the job need to start the model server?
         return 0 if current and not done and not c.stopped() else 1
@@ -485,7 +490,7 @@ def free_gb(path):
 
 
 def record_usage(c):
-    """CPU- and GPU-hours of every job the campaign recorded (heartbeats excluded: about 6 CPU-minutes a day)."""
+    """CPU- and GPU-hours of every job the campaign recorded (heartbeats excluded: about 2 CPU-minutes a day)."""
     jobs = [e["job_id"] for e in read_events(c) if e["event"] == "submitted" and e.get("job_id")]
     cpu, gpu = c.executor().usage(jobs)
     results.write_atomic(c.path / "budget.json", {"cpu_hours": round(cpu, 2), "gpu_hours": round(gpu, 2),
@@ -573,12 +578,14 @@ def read_events(c):
 
 
 def fault_hit(c, key, g, attempt):
-    """Whether faults.json injects `key` into generation g at this stage attempt (tests only)."""
+    """The faults.json entry that injects `key` into generation g at this stage attempt, or None (tests only)."""
     for f in c.faults().get(key, []):
-        if f == g or (isinstance(f, dict) and f.get("generation") == g
-                      and (f.get("attempts") == "all" or attempt in f.get("attempts", []))):
-            return True
-    return False
+        if f == g:
+            return {"generation": g}
+        if isinstance(f, dict) and f.get("generation") == g and (f.get("attempts") == "all"
+                                                                 or attempt in f.get("attempts", [])):
+            return f
+    return None
 
 
 # --- the watchdog (M6) --------------------------------------------------------
@@ -624,15 +631,19 @@ def handle(c, g, stage, failed_job, job=None):
         return 0
     info = c.executor().job_info(failed_job)
     attempt = st.get("stage_attempt", 1)
-    c.event("stage_failed", stage=stage, generation=g, failed_job=failed_job, attempt=attempt, **info)
+    # Keep a generation job's restart off its node only on evidence the node is bad: excluding a good
+    # node after any failure can leave no free A100 (m6-dev-a waited for one, job 96307).
+    node_fault = bool(info["node"]) and ((info["exit_code"] or "").split(":")[0] == NODE_FAULT_EXIT
+                                         or info["state"] in ("NODE_FAIL", "BOOT_FAIL"))
+    exclude = [info["node"]] if stage == "generate" and node_fault else []
+    c.event("stage_failed", stage=stage, generation=g, failed_job=failed_job, attempt=attempt, excluded=exclude, **info)
     if attempt > c.param("max_stage_retries"):
         log = c.path / "logs" / f"{stage}-g{g}-{failed_job}.out"
         c.halt("stage_failed", f"the {stage} job of generation {g} failed {attempt} time(s); the last, job "
                                f"{failed_job}, ended {info['state']} (exit {info['exit_code']}) on "
                                f"{info['node'] or 'no node'}. Log: {log}")
         return 0
-    # A generation job's failure is usually its GPU or node, so its restart avoids that node.
-    restart_stage(c, exclude=[info["node"]] if stage == "generate" and info["node"] else ())
+    restart_stage(c, exclude=exclude)
     print(f"restarted the {stage} job of generation {g} (attempt {attempt + 1})")
     return 0
 
@@ -715,14 +726,17 @@ def show_status(c):
     print(f"campaign {c.id} ({c.meta['spec']['file']}, executor {c.meta['executor']}): {st['state']}"
           + (f" ({st['reason']}): {st['message']}" if st.get("reason") else (f": {st['message']}" if st.get("message") else "")))
     print(f"  now: generation {st['generation']} of {c.params['generations']}, {st['stage']}, attempt "
-          f"{st.get('attempt', 1)}, jobs {st.get('jobs')}; updated {st['updated_at']}")
+          f"{st.get('attempt', 1)}" + (f" (stage job attempt {st['stage_attempt']})" if st.get("stage_attempt", 1) > 1 else "")
+          + f", jobs {st.get('jobs')}; updated {st['updated_at']}")
     for gd in sorted(c.path.glob("generations/*"), key=lambda p: int(p.name)):
         s = read_json(gd / "summary.json")
         if s:
             print(f"  generation {s['generation']}: {s['statuses']}; best of generation {s['best_of_generation']}, "
                   f"best so far {s['best_overall']}")
     hb = read_json(c.path / "heartbeat.json")
-    if hb:
+    if hb and str(hb.get("last_action", "")).startswith("ended"):
+        print(f"  heartbeat: {hb['last_action']} at {hb['last_run']}")
+    elif hb:
         print(f"  heartbeat: every {c.param('heartbeat_minutes')} min; last ran {hb.get('last_run', 'not yet')}"
               f" ({hb.get('last_action', '-')}); next job {hb.get('next')}")
     end = datetime.datetime.now(datetime.timezone.utc) if st["state"] == "running" \
@@ -735,7 +749,7 @@ def show_status(c):
             used.append(f"{value} {unit}-hours" + (f" of {key} {c.param(key)}" if c.param(key) else ""))
         used[-1] += f" (as of {budget['at']})"
     print(f"  used: {'; '.join(used)}; mail on halt: {'on' if c.meta.get('mail') else 'off'}")
-    if c.stopped():
+    if c.stopped() and st["state"] == "running":
         print("  STOP file present: the campaign halts after the current stage")
     return 0
 
@@ -928,16 +942,18 @@ def selftest(keep=False):
         check("(e) resume after STOP continues to the end", c3.status["state"] == "finished")
 
         # --- M6: the watchdog -------------------------------------------------------------
-        # (M6 a) a generation job that fails once is restarted by its handler, off the node it failed on.
+        # (M6 a) a generation job fails, then fails a node check (exit 3): its handler restarts it each
+        # time, and keeps it off the node only after the node check.
         cg = start(variant("g", generations=1), name="selftest-g", executor="local")
-        (cg.path / "faults.json").write_text(json.dumps({"generate_fail": [{"generation": 1, "attempts": [1]}]}))
+        (cg.path / "faults.json").write_text(json.dumps({"generate_fail": [
+            {"generation": 1, "attempts": [1]}, {"generation": 1, "attempts": [2], "exit": 3}]}))
         drain_local(cg)
         events = read_events(cg)
         fails = [e for e in events if e["event"] == "stage_failed"]
         jobs = [e for e in events if e["event"] == "submitted" and e["stage"] == "generate"]
-        check("(M6 a) a failed generation job is restarted", cg.status["state"] == "finished" and len(fails) == 1
-              and fails[0]["stage"] == "generate" and len(jobs) == 2 and jobs[1]["exclude"] == ["localhost"],
-              f"{len(fails)} failure(s), {len(jobs)} generation job(s), exclude {jobs[-1]['exclude'] if jobs else '-'}")
+        check("(M6 a) a failed generation job is restarted", cg.status["state"] == "finished" and len(fails) == 2
+              and len(jobs) == 3 and [j["exclude"] for j in jobs] == [[], [], ["localhost"]],
+              f"{len(fails)} failure(s), excludes {[j['exclude'] for j in jobs]}")
 
         # (M6 c) the stage job and its handler vanish without failing: only the heartbeat can notice.
         cs = start(variant("s", generations=1), name="selftest-s", executor="local")

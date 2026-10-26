@@ -117,7 +117,7 @@ Every stage is idempotent, so running it twice is safe. That matters because Slu
 | A candidate is invalid, doesn't compile, crashes or times out | Scored 0 and recorded; the campaign goes on |
 | An evaluation task fails on infrastructure, is cancelled or is killed | `aggregate` resubmits just those tasks, up to `max_task_retries` times, with `--exclude=` the nodes named in their infrastructure markers. A task killed by `scancel` or a node failure writes no marker, so its retry may run on any node |
 | It still fails after that | The campaign halts with `halted: infra`. The message names each task, its last error and node, and the log directory |
-| A generation or aggregation job fails, times out or is cancelled | Its handler restarts it, up to `max_stage_retries` times; a generation job is kept off the node it failed on. Then the campaign halts with `halted: stage_failed` (section 5) |
+| A generation or aggregation job fails, times out or is cancelled | Its handler restarts it, up to `max_stage_retries` times. A generation job is kept off its node only if the node looks bad (section 5). Then the campaign halts with `halted: stage_failed` |
 | A stage job and its handler both vanish, or a handler fails | The heartbeat restarts the stage within about an hour, or halts with `halted: stalled` |
 | A limit is reached | The campaign finishes or halts with the limit's reason (section 6) |
 | `make campaign-stop` | The next stage boundary halts with `halted: stopped`; `resume` clears the `STOP` file and continues. With `NOW=1`, it cancels the stage's jobs and halts at once |
@@ -133,7 +133,7 @@ Every stage is idempotent, so running it twice is safe. That matters because Slu
 That makes:
 - task 3 of generation 1 fail its first attempt
 - every aggregation of generation 2 crash before saving; `{"generation": 2, "attempts": [1]}` makes only the first crash
-- the first generation job of generation 2 exit 1 before it starts the model server
+- the first generation job of generation 2 fail before it starts the model server; `"exit": 3` makes it fail as a node check does, so its restart avoids the node
 
 `"attempts": "all"` makes a failure persistent. For `infra`, attempts count a task's evaluations; for the others, a stage job's restarts (`stage_attempt`).
 
@@ -142,6 +142,8 @@ That makes:
 **Failure handlers.** Every generation and aggregation job is submitted with a handler, `slurm/campaign_handle.sbatch`. The handler waits with `--dependency=afternotok:<job> --kill-on-invalid-dep=yes`:
 - if the job succeeds, Slurm removes the handler, unrun
 - if the job fails, times out, runs out of memory or loses its node, the handler runs. It reads how the job ended from `sacct` and logs a `stage_failed` event. Then it restarts the job (attempt 2, 3, …) or, past `max_stage_retries`, halts the campaign with `stage_failed`, naming the job, its Slurm state, exit code, node and log
+
+A generation job's restart is kept off its node only on evidence the node is bad: the job exited 3, which its script does when the node can't submit jobs, the GPU preflight fails, or the model server won't start; or Slurm reports `NODE_FAIL` or `BOOT_FAIL`. After any other failure, the restart may run anywhere. HPC3 has only four A100 nodes, and excluding a good one can leave no free GPU: in the M6 tests, a restart that excluded `cs001` after an injected failure was given an estimated start 1.5 days away, while `cs001` was the only node with free A100s.
 
 Evaluation arrays need no handler: their aggregation already waits with `afterany` and retries missing tasks.
 
@@ -155,7 +157,7 @@ It checks no limits; aggregation does that once per generation.
 **Shared-compute safeguards:**
 - **One at a time:** each campaign's heartbeats share one job name, `afar-heartbeat-<id>`, with `--dependency=singleton`, so Slurm never runs two at once. A heartbeat that finds another one already due ends without a successor.
 - **An interval floor:** `heartbeat_minutes` is at least 60 (10 only in a spec with `test: true`).
-- **Small footprint:** 1 CPU for about 15 s per run, about 24 jobs and 6 CPU-minutes a day, and one `squeue` an hour. Between runs, one pending job holds no resources.
+- **Small footprint:** 1 CPU for 4–6 s per run (measured in M6 part B), about 24 jobs and 2 CPU-minutes a day, and one `squeue` an hour. Between runs, one pending job holds no resources.
 - **Easy removal:** `scancel --name=afar-heartbeat-<id>`.
 
 These follow the guidance found when M6 was planned: SJSU has no rule on periodic jobs; Cirrus sets a 60 s floor on scheduler polling; NERSC restarts its workflow processes hourly through `scrontab`, which HPC3 has disabled.
@@ -206,7 +208,7 @@ Aggregation checks the limits after each generation, so one can be overshot by u
 - `openevolve-run` continues from the last checkpoint
 
 M6 added these checks:
-- a generation job that fails once is restarted by its handler, off the node it failed on
+- a generation job that fails is restarted by its handler; it's kept off its node only after a node check fails (exit 3)
 - an aggregation that crashes on every attempt is restarted twice, then halts with `stage_failed` and mails; the address appears in no campaign file
 - a halt's mail is a Slurm job with the right name, `--mail-type=END` and address, recorded as a `mailed` event
 - a persistent infrastructure failure mails; a `STOP` doesn't
@@ -222,7 +224,18 @@ M6 added these checks:
 
 **The real stage scripts** ran one generation on coe-hpc1 with a stand-in `sbatch` that recorded each command.
 
-**On HPC3 (2026-10-26),** `m5-dev-v1` passed M5's four acceptance tests. Job IDs and full results are in `docs/status.md`.
+**On HPC3, M6 part B (2026-10-26),** `m6-dev-v1` passed all four of M6's short tests. Job IDs and full results are in `docs/status.md`.
+
+| Test | Campaign | What happened |
+|---|---|---|
+| A failed generation job is restarted | `m6-dev-e` | The injected failure (exit 2) on `cs001` restarted on the same node, and both generations finished. The first try, `m6-dev-a`, excluded `cs001` and stranded the restart (section 5) |
+| A cancelled stage is restarted | `m6-dev-b`, `m6-dev-f` | A cancelled aggregation was restarted by its handler within seconds, so Slurm treats a cancel as a failure. With its handler cancelled too, the heartbeat restarted it 18 min after the stall |
+| A persistent crash halts and mails | `m6-dev-c` | Three attempts, then `halted: stage_failed`; the mail arrived |
+| `campaign-stop NOW=1` | `m6-dev-d` | Halted 5 s later, with no retry and no mail |
+
+**Reaction times:** a handler restarts a failed job about 10 s after it ends. The heartbeat restarts a stall at its first run after the status has been unchanged for 10 min: 10–20 min after the stall with a test spec's 10-min heartbeat, and 10–70 min with the hourly one. Every heartbeat chain ended at its next run after its campaign ended.
+
+**On HPC3, M5 (2026-10-26),** `m5-dev-v1` passed M5's four acceptance tests. Job IDs and full results are in `docs/status.md`.
 
 | Test | Campaign | What happened |
 |---|---|---|

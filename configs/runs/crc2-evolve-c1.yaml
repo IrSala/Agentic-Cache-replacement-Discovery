@@ -1,0 +1,25 @@
+# M6 part C: the 48-hour pilot, and the first real campaign on the 14-trace evolution
+# set (docs/trace-calibration.md, docs/campaigns.md). One candidate takes about 5.1
+# CPU-hours there, 62 min on 14 CPUs (bound by mcf_46B), so 24 candidates a generation
+# take about 336 CPUs for an hour. The campaign ends at 48 h (a planned finish) and halts
+# if it reaches 5,000 CPU-hours, about 1.6 times the expected 3,000.
+#     make oe-check SPEC=crc2-evolve-c1
+#     make campaign-start SPEC=crc2-evolve-c1      (on g17, with AFAR_MAIL_USER set)
+spec_version: 1
+description: M6 pilot, the first real campaign on crc2-evolve-v1 (48 h, 5,000 CPU-hours)
+seed: seeds/evolved_repl.h
+model: qwen2.5-coder-7b-v1
+prompt: champsim-rewrite-v1
+search: champsim-rewrite-v1
+evaluator:
+  policy: champsim_ipc
+  experiment: crc2-evolve-v1
+  cpus_per_candidate: 14            # one per trace, so a candidate takes as long as its slowest trace
+campaign:
+  generations: 60                   # a ceiling; max_wall_hours ends it first, at about 40 generations
+  candidates_per_generation: 24     # 8 per island with the search profile's 3 islands
+  max_concurrent_tasks: 24
+  max_task_retries: 2
+  max_stage_retries: 2
+  max_wall_hours: 48
+  max_cpu_hours: 5000

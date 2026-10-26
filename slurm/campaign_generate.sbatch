@@ -20,16 +20,20 @@ py=.venv/controller/bin/python
 campaign="${AFAR_CAMPAIGN:?}" generation="${AFAR_GENERATION:?}"
 echo "job=${SLURM_JOB_ID} node=$(hostname) date=$(date -Is) commit=$(git rev-parse --short HEAD 2>/dev/null) campaign=${campaign} generation=${generation}"
 
+# Exit 3 means this node looks unusable, so the job's handler keeps the restart off it
+# (controller/campaign.py handle); after any other failure the restart may run anywhere.
+node_fault=3
+
 # Later stages are submitted from this node, so check that it can (M0 checked only c20).
-sbatch --test-only --partition=cpuqs --wrap=true >/dev/null 2>&1 || { echo "this node can't submit jobs (sbatch --test-only failed)" >&2; exit 1; }
+sbatch --test-only --partition=cpuqs --wrap=true >/dev/null 2>&1 || { echo "this node can't submit jobs (sbatch --test-only failed)" >&2; exit $node_fault; }
 
 if "$py" -m controller.campaign generate --campaign "$campaign" --generation "$generation" --needs-llm; then
     source configs/llm/vllm.env
     source "$("$py" -m controller.campaign generate --campaign "$campaign" --generation "$generation" --model-profile)"
     source slurm/llm_serve.sh
-    llm_gpu_preflight
-    llm_start
-    llm_wait_ready 900
+    llm_gpu_preflight || exit $node_fault
+    llm_start || exit $node_fault
+    llm_wait_ready 900 || exit $node_fault
     api=(--api-base "$AFAR_LLM_API_BASE")
 else
     api=()      # already generated, stopped, or not the current stage: no model needed

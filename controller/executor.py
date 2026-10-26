@@ -183,6 +183,7 @@ class LocalExecutor:
         self.count = 0
         self.failed = []                     # (job id, stage, generation, index, error) of jobs that failed
         self.outcome = {}                    # job id -> "ok" or "failed"
+        self.exit_status = {}                # job id -> its exit status, 1 for a job that raised
         self.submitted = []                  # every request, for tests
         self.running = None
         self.fake_usage = (0.0, 0.0)         # what usage() reports, for tests
@@ -203,8 +204,8 @@ class LocalExecutor:
         return [j for j in job_ids if j and (j == self.running or any(e[0] == j for e in self.queue))]
 
     def job_info(self, job):
-        return {"state": "FAILED" if self.outcome.get(job) == "failed" else "COMPLETED", "exit_code": "1:0",
-                "node": "localhost"}
+        return {"state": "FAILED" if self.outcome.get(job) == "failed" else "COMPLETED",
+                "exit_code": f"{self.exit_status.get(job, 0)}:0", "node": "localhost"}
 
     def usage(self, job_ids):
         return self.fake_usage
@@ -251,5 +252,6 @@ class LocalExecutor:
             if code not in (0, None):
                 self.failed.append((job, stage, generation, index, code))
                 self.outcome[job] = "failed"
+                self.exit_status[job] = code if isinstance(code, int) else 1
             else:
                 self.outcome.setdefault(job, "ok")
