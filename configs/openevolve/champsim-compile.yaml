@@ -11,7 +11,7 @@ random_seed: null        # a top-level seed becomes one fixed LLM seed on every 
 language: cpp            # used for the prompt's code fences and for parsing the reply
 
 llm:
-  primary_model: "afar-llm"                # name the local server exposes (configs/llm/serve.env)
+  primary_model: "afar-llm"                # name the local server exposes (configs/llm/vllm.env)
   api_base: "http://127.0.0.1:8000/v1"     # default only; jobs override with --api-base
   api_key: "${AFAR_LLM_API_KEY}"           # random per job, exported by slurm/llm_serve.sh
   temperature: 0.7

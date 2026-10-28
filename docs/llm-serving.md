@@ -30,7 +30,7 @@ Measured by `slurm/discover_gpu.sbatch` (job 90582, node `cs002`) and `slurm/che
 
 ## Pinned assets (R4)
 
-The vLLM image is pinned in `configs/llm/vllm.env`, and each model in a profile, `configs/models/<name>.env`; a run spec names its model by profile (`docs/run-specs.md`). Before M4 both lived in `configs/llm/serve.env`, which now just sources the default profile. Paths are under `$AFAR_ASSETS` (`/data/cmpe295-bond/$USER/afar`).
+The vLLM image is pinned in `configs/llm/vllm.env`, and each model in a profile, `configs/models/<name>.env`; a run spec names its model by profile (`docs/run-specs.md`). Before M4 both lived in `configs/llm/serve.env`, which was removed in M5. Paths are under `$AFAR_ASSETS` (`/data/cmpe295-bond/$USER/afar`).
 
 | Asset | Pin | Location | Status |
 |---|---|---|---|
@@ -111,7 +111,7 @@ The server log ends each run with an `EngineDeadError` at shutdown. That is expe
 
 ## OpenEvolve with the real model (R6)
 
-`slurm/openevolve_toy.sbatch` runs `openevolve-run` on the function_minimization toy against the sidecar and writes `runs/toy-<jobid>`:
+R6 ran `slurm/openevolve_toy.sbatch`, which ran `openevolve-run` on the function_minimization toy against the sidecar and wrote `runs/toy-<jobid>`. Since M4 the same run is `slurm/openevolve.sbatch SPEC=toy-v1`; the old script was removed in M5. The job:
 - It logs at DEBUG, so every raw reply is kept, including replies whose edits fail to apply.
 - It forwards the time-limit SIGTERM to OpenEvolve, which then saves `best/`.
 - It checks that the API key appears in no log.

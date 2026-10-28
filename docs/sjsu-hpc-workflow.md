@@ -1,6 +1,6 @@
 # Developing on SJSU CoE HPC: workflow guide
 
-A practical guide for people (and LLM coding agents) new to the SJSU College of Engineering HPC. Facts marked *(measured)* were checked between 2026-10-15 and 2026-10-22. Clusters change, so re-check with `sinfo`, `module avail` and `df -h` before relying on numbers.
+A practical guide for people (and LLM coding agents) new to the SJSU College of Engineering HPC. Facts marked *(measured)* were checked between 2026-10-15 and 2026-10-27. Clusters change, so re-check with `sinfo`, `module avail` and `df -h` before relying on numbers.
 
 ## Rules at a glance
 
@@ -12,6 +12,7 @@ A practical guide for people (and LLM coding agents) new to the SJSU College of 
 6. **Heavy work only through Slurm.** Login nodes are for editing, compiling and small tests.
 7. **Use absolute paths in job scripts**, and create the log directory before you submit.
 8. **After any environment change, run a short check job on HPC3** before real work.
+9. **Share the cluster fairly.** Hold a GPU only while you use it, cap how many tasks run at once, run periodic jobs hourly or slower, and measure what your jobs cost (section 5).
 
 ## 1. What an HPC cluster is
 
@@ -63,6 +64,8 @@ On coe-hpc1 the Spack modules may not be on `MODULEPATH` in non-interactive shel
 | `nsfqs` / `nsfqm` / `nsfql` | 2 / 14 / 21 days | `g20`–`g32` (not characterized here) |
 | `condo` | 30 days | `condo1`, `condo3`–`11`. Faculty-owned; your jobs can be preempted by the owner |
 
+**CPU nodes differ in speed** *(measured)*. The same single-threaded simulation took 2.6–4.2 h depending on the node, with identical results: `homacs3` was fastest and `c1` slowest. Size `--time` for the slowest node.
+
 The GPU partitions mix three kinds of GPU:
 
 | GPU | Nodes | Request with | Notes |
@@ -72,6 +75,11 @@ The GPU partitions mix three kinds of GPU:
 | P100 | `g1`–`g15`, 1 per node | `--gres=gpu:p100:1` | compute capability 6.0; too old for vLLM and many recent frameworks |
 
 A plain `--gres=gpu:1` matches **any** type: P100, A100 or H100. On 2026-10-22, other users' `gpu:1` jobs held A100s on `cs001` and `cs003`. Name the type you need. GPU nodes have a local SSD at `/tmp` (`$TMPDIR`, about 370 GB on `cs002`). **`cs002` GPU 0 is faulty** (uncorrectable ECC errors, 2026-10-15/21), so submit GPU jobs with `--exclude=cs002` until it's repaired.
+
+**A100s can be booked for a day or more** *(measured 2026-10-27)*:
+- **What was seen:** other users' jobs held all 12 A100s outside `cs002`, with 10–27 h left, and 15 more A100 jobs were queued. A 30-minute job had waited 9 h with reason `Priority`, and Slurm estimated its start 27 h later. Meanwhile `cs002`'s 4 A100s sat idle, and only one H100 job was running.
+- **Why a short job didn't jump the queue:** backfill starts a job early only if it fits in a gap before higher-priority jobs' planned starts, and long jobs leave no gaps.
+- **What to do:** if your software runs on more than one GPU type, accept any of them. For example, `--gres=gpu:1 --exclude=g[1-15],cs002` asks for an A100 or an H100 (not yet tested). Check the GPU queue before any plan that depends on getting a GPU quickly (section 4).
 
 **Per-user limits** (`sacctmgr show qos format=Name,MaxTRESPerUser,MaxJobsPerUser`):
 - `gpuqs` uses the `gpu3nodes` QOS (`scontrol show partition gpuqs`), which allows **2 nodes per user**: at most two 4×A100 nodes, or 8 A100s, at once. `nsf3nodes` has the same cap.
@@ -83,16 +91,20 @@ A plain `--gres=gpu:1` matches **any** type: P100, A100 or H100. On 2026-10-22, 
 
 ### 2.4 Storage
 
-| Path | What it's for | Notes *(measured 2026-10-15)* |
+| Path | What it's for | Notes *(measured 2026-10-27)* |
 |---|---|---|
-| `/home/<id>` | code, environments, small results | NFS, shared, **99% full** across all users |
-| `/data/<group>/` | durable project data: models, containers, datasets | NFS, 7.2 TB free; one writable directory per group (e.g. `cmpe295-bond`) |
-| `/scratch/<group>/` | large, temporary, I/O-heavy job files | NFS, 13 TB free |
+| `/home/<id>` | code, environments, small results | NFS, shared, **100% full** across all users (1.1 TB free of 114 TB) |
+| `/data/<group>/` | durable project data: models, containers, datasets | NFS, 3.7 TB free, down from 7.2 TB on 2026-10-15; one writable directory per group (e.g. `cmpe295-bond`) |
+| `/scratch/<group>/` | large, temporary, I/O-heavy job files | NFS, 12 TB free |
 | `/tmp` on a compute node | per-job temporary files | local SSD; deleted after the job |
 
 SJSU publishes **no quota, backup or purge policy** for `/data` or `/scratch`. Common practice elsewhere: scratch isn't backed up and may be purged, so never keep the only copy of anything there. Group directories are shared with other students, so work inside `<group>/<your-id>/`.
 
 `/data/<group>` itself is open only to group members (`drwxrws---`). Files you create there are readable by the group but not writable by it, under the default umask. So **one read-only copy of a large model or container can serve the whole group**: teammates read it by path instead of downloading their own.
+
+**NFS between the clusters.**
+- **New files can be briefly invisible** *(seen 2026-10-26)*. A file a job had just written on HPC3 was missing on coe-hpc1 (`FileNotFoundError`), then present on a retry seconds later, because NFS caches lookups. When a script on one cluster reads files that jobs on the other write, retry briefly before treating a missing file as an error.
+- **Don't rely on file locks across nodes.** Arrange things so that only one job writes a given file at a time. Write it under a temporary name, then rename it into place, so readers never see half a file.
 
 ### 2.5 Modules are per cluster
 
@@ -189,20 +201,51 @@ a=$(sbatch --parsable step1.sbatch); sbatch --dependency=afterok:$a step2.sbatch
 env -i HOME="$HOME" USER="$USER" PATH=/usr/bin:/bin bash script.sh
 ```
 
-**HPC3 Slurm settings that matter for automation** *(measured 2026-10-23)*:
+**HPC3 Slurm settings that matter for automation** *(measured 2026-10-23 to 2026-10-27)*:
 - Slurm 23.11.10.
 - **Jobs can submit jobs:** compute nodes have `sbatch`, `squeue` and `sacct`, so a job can submit its own successor.
 - **`scrontab` (Slurm's cron) is disabled.** For periodic checks, use a short job that resubmits itself with `--begin=now+1hour`.
 - **Failed dependencies:** to react to a failed job, submit a handler with `--dependency=afternotok:<id>`. `afterok` on an array fires only if *every* task succeeds; otherwise the dependent job waits forever (`DependencyNeverSatisfied`) unless it was submitted with `--kill-on-invalid-dep=yes`.
 - **Requeueing:** `JobRequeue=1`, so jobs are requeued after a node failure. A job script must be safe to run twice.
 - **Limits:** `MaxArraySize` is 1001 (array indices 0–1000), and `MaxJobCount` is 10000 jobs cluster-wide.
-- **Mail:** `MailProg=/bin/mail`, so `--mail-type=FAIL --mail-user=<you>` can notify you (delivery not yet tested).
+- **`afternotok` fires on a cancel too.** Slurm counts `scancel` as a failure, so a handler also runs when you cancel the job it watches. Have the handler check whether the stop was intended, for example by looking for a stop file, before it retries.
+- **Unneeded handlers disappear.** With `--kill-on-invalid-dep=yes`, an `afternotok` job whose job succeeded is removed without running, and it sends no mail.
+- **For arrays, use `afterany`.** A job submitted with `--dependency=afterany:<array id>` runs once every task has ended, whether or not they succeeded. It can then find the failed tasks and resubmit them itself.
+- **One at a time with `singleton`.** `--dependency=singleton` starts a job only when no other job of yours with the same name is running. So a periodic chain whose jobs share one name never overlaps.
+- **A job that has left the queue:** `squeue -j <id>` then fails with `Invalid job id specified`. Use `sacct -j <id>` to see how it ended.
+- **Mail:** compute nodes have **no mail program** (no `/bin/mail`, `mailx` or `sendmail`), so a job can't send mail itself, even though Slurm's `MailProg` is `/bin/mail`.
+  - **Slurm's own mail does arrive:** with `--mail-type=END` (or `FAIL`) and `--mail-user=<you>`, the controller mails when the job ends.
+  - **To send a message from inside a job,** submit a tiny job named after the message, and Slurm mails when it ends:
+
+    ```bash
+    sbatch --job-name=myrun_halted --partition=cpuqs --mem=100M --time=00:01:00 --mail-type=END --mail-user="$MY_MAIL" --wrap=true
+    ```
+
+  - **The mail has a subject only,** `Slurm Job_id=<n> Name=<name> Ended, …`, with no body.
+  - **Keep your address out of the repo:** read it from an environment variable.
 
 **Sizing a request and diagnosing a wait:**
 - `sbatch --test-only <script>` reports whether the request fits, and the expected start time and node, without submitting.
 - `squeue -j <id> -o "%i %T %r %S"` shows a pending job's reason (`Resources`, `Priority`, `QOSMaxNodePerUserLimit`, …) and Slurm's estimated start.
 - `scontrol show node <node> | grep -E "CPUAlloc|AllocMem|AllocTRES"` shows what's left on a node. The free GPUs, CPUs *and* memory must all fit the request.
 - Size `--mem` and `--time` from `sacct` measurements, not guesses. Oversized requests wait longer.
+- **Who holds the GPUs, and for how long:** the first command below lists the GPU jobs, running and queued, with their time left. The second shows each GPU node's state and its free CPUs.
+
+  ```bash
+  squeue -p gpuqs -o "%.10i %.10u %.9T %.14b %.10L %.10N %.25r"
+  ```
+
+  ```bash
+  sinfo -p gpuqs -N -o "%.10N %.30G %.12T %.14C"
+  ```
+
+- **Slurm's estimated start is often just when a running job's time limit ends.** It moves earlier if jobs finish early.
+- **Excluding a node can strand a job** *(measured)*. A resubmission that excluded the node where its first try had failed was given a start 1.5 days away, because that node was the only one with free A100s. Exclude a node only on evidence that it's faulty: a failed hardware check, or a Slurm state of `NODE_FAIL`.
+
+**Measuring what you used:**
+- **The command:** `sacct -X -n -P -o JobIDRaw,ElapsedRaw,AllocCPUS,AllocTRES -j <ids>`. Elapsed seconds times allocated CPUs, or the `gres/gpu` count in `AllocTRES`, gives the CPU- and GPU-hours your jobs held.
+- **What it counts:** what you held is what other users lost, whether or not your program kept the cores busy.
+- **It's accurate:** for one run of four CPU-array generations, it agreed with the tasks' own wall times × CPUs to within 0.2%.
 
 **Signals and services inside a job:**
 - `--signal=B:TERM@60` sends SIGTERM 60 s before the time limit to the **batch shell only**. Run long programs as `prog & wait $!` so a trap fires promptly, and have the trap pass the signal on to `prog` so it can save its state. Slurm kills whatever is left when the script exits.
@@ -212,7 +255,28 @@ env -i HOME="$HOME" USER="$USER" PATH=/usr/bin:/bin bash script.sh
   - poll its health endpoint before starting the client, and stop it from an `EXIT` trap
 - Nodes are shared, so other users can reach `127.0.0.1` too. The random key and the server's short life are the mitigation.
 
-## 5. Common problems
+## 5. Sharing the cluster
+
+HPC3 is a shared community cluster. SJSU publishes no rules on periodic jobs or scheduler polling *(checked 2026-10-26)*. So these follow other centers' published rules, plus measurements made here.
+
+- **Don't poll the scheduler in a loop.** Cirrus (UK) allows scripts at most one `squeue` or `sinfo` call per 60 s, and treats disruptive polling as a breach of its acceptable-use policy. To react to a job's end, use dependencies (`afterok`, `afternotok`, `afterany`), not a loop that watches it.
+- **Avoid floods of tiny jobs.** Sweden's NSC: "A single 5 second job is OK. Ten thousand such jobs are not OK." Keep most jobs longer than about 10 minutes.
+- **Run periodic jobs hourly or slower.** NERSC's own pattern for keeping a workflow alive is an hourly restart through `scrontab`. `scrontab` is disabled on HPC3, so use a job that resubmits itself with `--begin=now+1hour`:
+  - **Never two at once:** give every job in the chain the same name and `--dependency=singleton`.
+  - **Successor first:** submit the next job before doing the check, so a check that crashes can't end the chain. End the chain when the work it watches has ended.
+  - **Easy to remove:** `scancel --name=<name>` deletes the whole chain.
+  - **Its cost** *(measured)*: one such check took 1 CPU for 4–6 s, so an hourly one costs about 2 CPU-minutes a day. Between runs, the one pending job holds nothing.
+- **Hold a GPU only while you use it.**
+  - **Split mixed work:** if a pipeline alternates GPU work (such as LLM calls) with long CPU work, run each in its own job: a short GPU job, then CPU jobs for the rest.
+  - **Start any server inside the GPU job:** a 7B model under vLLM was healthy 75–120 s after start. Stop it when the job ends.
+  - **Measured:** split this way, one pipeline held its GPU for 5.5 of 27 minutes, instead of all 27.
+- **Cap what runs at once, and set a budget.**
+  - **Throttle arrays,** for example `--array=0-99%24`, and know your share: 24 tasks × 14 CPUs is 336 cores, about a fifth of the CPU partition's 1,632.
+  - **Estimate CPU-hours from measured runs, then check them early.** One project estimated 3,000 CPU-hours for a 48-hour run, but its first generations projected 6,500–8,600, because more tasks ran to completion than assumed.
+  - **Enforce it:** a run that checks its own `sacct` total against a cap stops itself before it costs more than planned.
+- **Mind the shared disks:** `/home` is full for everyone (section 2.4). Keep caches and data on `/data`, and check `df -h` before large writes.
+
+## 6. Common problems
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -232,9 +296,14 @@ env -i HOME="$HOME" USER="$USER" PATH=/usr/bin:/bin bash script.sh
 | a GPU job stays `PENDING (Resources)` for hours while `squeue` shows free GPUs | the nodes with free GPUs don't have enough unallocated memory (or CPUs) left for the request | check with `scontrol show node`; lower `--mem` to what `sacct` MaxRSS measured, plus a margin |
 | `fatal error: charconv: No such file or directory` compiling C++17 on coe-hpc1 | the default gcc 7.3 is too old for that header | load the Spack gcc 12.2 module for builds |
 | a program in a job is killed at the time limit without saving | `--signal=B:` reaches only the batch shell; Slurm kills the rest when the script exits | trap the signal in the script and pass it on to the program (section 4) |
+| no mail arrives from a job, or `mail` isn't found on the node | compute nodes have no mail program | let Slurm send it: a tiny job with `--mail-type=END --mail-user=<you>` (section 4) |
+| a short GPU job stays `PENDING (Priority)` for many hours | other users' long jobs hold every GPU of the type you asked for, and higher-priority jobs are queued ahead of yours | check `squeue -p gpuqs` and `sinfo -p gpuqs` (section 4); accept another GPU type if your software supports it; don't exclude healthy nodes |
+| a resubmitted job waits far longer than its first try | its `--exclude` removed the only node with free resources | exclude a node only after a hardware fault |
+| an `afternotok` handler runs after you `scancel` a job | Slurm counts a cancel as a failure | have the handler check for an intended stop before it retries |
+| a file a job just wrote is missing on coe-hpc1 | NFS caches lookups between the clusters | retry after a few seconds (section 2.4) |
 | `apptainer pull` sits at "Creating SIF file" for hours on coe-hpc1, using no CPU | coe-hpc1's `mksquashfs` (CentOS 7 squashfs-tools 4.3) deadlocked on a large image | stop it. Then run `apptainer build --sandbox --fix-perms <dir> docker://…` on coe-hpc1, and `apptainer build x.sif <dir>` in an HPC3 `cpuqs` job (verified: about 32 min each for a 9 GB image) |
 
-## 6. Reference implementation: AFAR_HPC
+## 7. Reference implementation: AFAR_HPC
 
 This repository applies the guide end to end. See `README.md` for details.
 
@@ -248,14 +317,24 @@ This repository applies the guide end to end. See `README.md` for details.
   - `slurm/llm_serve.sh` runs vLLM inside the job, following the service pattern in section 4.
   - `slurm/openevolve.sbatch SPEC=<run spec>` runs OpenEvolve against it; the spec names the model, prompt, search settings and evaluator (`docs/run-specs.md`).
   - `AFAR_LLM_FAKE=1` tests these scripts on coe-hpc1 against a stand-in server before any GPU time is used.
+- **Unattended runs** (`docs/campaigns.md`) apply sections 4 and 5:
+  - each generation is a short GPU job, then a CPU array, joined by `afterany`
+  - each stage job has an `afternotok` handler, and an hourly `singleton` heartbeat backs them up
+  - halts are mailed through Slurm, and CPU and GPU budgets are checked against `sacct`
+  - verified on HPC3 in October 2026 (`docs/status.md`)
 - **Verified from scratch:** a fresh clone of the GitHub repo passed `make setup` on coe-hpc1 (392 s) and its CPU and GPU jobs on HPC3 (2026-10-22). `docs/status.md` has the evidence and open issues.
 
 ## Sources
 
 - SJSU CoE HPC, user guide and access: https://www.sjsu.edu/cmpe/resources/hpc.php
 - HPC Carpentry, Introduction to HPC (concepts, login vs compute nodes, schedulers): https://carpentries-incubator.github.io/hpc-intro/
-- Slurm `sbatch` (export default, dependencies, arrays, `--parsable`): https://slurm.schedmd.com/sbatch.html
+- Slurm `sbatch` (export default, dependencies including `singleton`, `--begin`, `--kill-on-invalid-dep`, arrays, `--parsable`): https://slurm.schedmd.com/sbatch.html
 - Slurm job arrays: https://slurm.schedmd.com/job_array.html
+- Slurm `sacct` (`AllocTRES`, `ElapsedRaw`): https://slurm.schedmd.com/sacct.html
+- Slurm `squeue` (pending reasons, estimated start): https://slurm.schedmd.com/squeue.html
+- Cirrus, Slurm guidance (60 s floor on scheduler polling): https://skills.cirrus.ac.uk/site/plugins/cirrus/skills/slurm/SKILL.html
+- NSC, short jobs: https://nsc.liu.se/support/batch-jobs/tetralith/short-jobs
+- NERSC, workflow queue (hourly `scrontab` restarts): https://docs.nersc.gov/jobs/workflow/workflow-queue/
 - Lmod user guide (collections, `LMOD_SYSTEM_NAME`): https://lmod.readthedocs.io/en/latest/010_user.html
 - Python `venv` (environments are non-portable; recreate, don't move): https://docs.python.org/3/library/venv.html
 - python-build-standalone (glibc ≥ 2.17 baseline): https://gregoryszorc.com/docs/python-build-standalone/main/running.html

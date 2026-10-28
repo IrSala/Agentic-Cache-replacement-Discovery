@@ -56,8 +56,21 @@ SPEC_VERSION = 1
 RUN_JSON_VERSION = 1
 
 SPEC_KEYS = {"spec_version": int, "description": str, "seed": str, "model": str, "prompt": str, "search": str,
-             "evaluator": dict, "iterations": int}
-SPEC_OPTIONAL = {"language": str, "overrides": dict}
+             "evaluator": dict}
+SPEC_OPTIONAL = {"language": str, "overrides": dict, "iterations": int, "campaign": dict}
+# A staged campaign (controller/campaign.py, M5): GPU jobs generate, CPU arrays evaluate.
+CAMPAIGN_KEYS = {"generations": int, "candidates_per_generation": int}
+NUMBER = (int, float)
+CAMPAIGN_OPTIONAL = {"max_concurrent_tasks": int, "max_task_retries": int,
+                     # M6: stop conditions, a budget and the watchdog (docs/campaigns.md)
+                     "max_wall_hours": NUMBER, "target_fitness": NUMBER, "max_cpu_hours": NUMBER,
+                     "max_gpu_hours": NUMBER, "max_failed_generations": int, "min_free_gb": NUMBER,
+                     "max_stage_retries": int, "heartbeat_minutes": int, "test": bool}
+CAMPAIGN_DEFAULTS = {"max_concurrent_tasks": 40, "max_task_retries": 2, "max_failed_generations": 3,
+                     "min_free_gb": 200, "max_stage_retries": 2, "heartbeat_minutes": 60, "test": False}
+# A campaign's heartbeat polls the scheduler, so it runs at most hourly; only a test campaign may go faster.
+HEARTBEAT_FLOOR_MINUTES = {False: 60, True: 10}
+NODE_CPUS = 56                         # HPC3's CPU nodes (docs/sjsu-hpc-workflow.md); a candidate's task fits one
 EVALUATOR_KEYS = {"policy": str, "experiment": str, "openevolve_file": str, "executor": str,
                   "parallel_candidates": int, "cpus_per_candidate": int, "timeout_s": int, "openevolve": dict}
 PROFILE_KEYS = {"prompt": {"description": str, "requires": dict, "openevolve": dict},
@@ -127,8 +140,8 @@ def schema_problems(data, required, optional, where):
         if key not in data:
             if key in required:
                 found.append(f"{where}: missing {key}")
-        elif not isinstance(data[key], kind) or (kind is int and isinstance(data[key], bool)):
-            found.append(f"{where}: {key} must be {kind.__name__}")
+        elif not isinstance(data[key], kind) or (kind is not bool and isinstance(data[key], bool)):
+            found.append(f"{where}: {key} must be {getattr(kind, '__name__', 'a number')}")
     extra = set(data) - set(required) - set(optional)
     if extra:
         found.append(f"{where}: unknown key(s) {', '.join(sorted(extra))}")
@@ -187,7 +200,35 @@ def resolve(ref, *, cpus, api_base=None, template_dir="<run>/resolved/prompt"):
         raise SpecError("; ".join(problems))
     if spec["spec_version"] != SPEC_VERSION:
         raise SpecError(f"spec: spec_version {spec['spec_version']} is not supported (this resolver reads {SPEC_VERSION})")
-    if spec["iterations"] < 1:
+    campaign = None
+    if "campaign" in spec:
+        problems += schema_problems(spec["campaign"], CAMPAIGN_KEYS, CAMPAIGN_OPTIONAL, "campaign")
+        if problems:
+            raise SpecError("; ".join(problems))
+        campaign = {**CAMPAIGN_DEFAULTS, **spec["campaign"]}
+        if min(campaign["generations"], campaign["candidates_per_generation"], campaign["max_concurrent_tasks"]) < 1 \
+                or campaign["max_task_retries"] < 0:
+            problems.append("campaign: generations, candidates_per_generation and max_concurrent_tasks must be at "
+                            "least 1, and max_task_retries at least 0")
+        if any(campaign.get(k, 1) <= 0 for k in ("max_wall_hours", "max_cpu_hours", "max_gpu_hours")) \
+                or campaign["min_free_gb"] < 0 or campaign["max_failed_generations"] < 1 \
+                or campaign["max_stage_retries"] < 0:
+            problems.append("campaign: max_wall_hours, max_cpu_hours and max_gpu_hours must be above 0, "
+                            "min_free_gb and max_stage_retries at least 0, and max_failed_generations at least 1")
+        floor = HEARTBEAT_FLOOR_MINUTES[campaign["test"]]
+        if campaign["heartbeat_minutes"] < floor:
+            problems.append(f"campaign: heartbeat_minutes {campaign['heartbeat_minutes']} is below {floor}"
+                            + ("" if campaign["test"] else " (only a spec with test: true may check more often)"))
+        total = campaign["generations"] * campaign["candidates_per_generation"]
+        if spec.get("iterations", total) != total:
+            problems.append(f"spec: iterations {spec['iterations']} must equal generations x candidates_per_generation "
+                            f"({total}) in a campaign, or be left out")
+        iterations = total
+    elif "iterations" not in spec:
+        raise SpecError("spec: missing iterations (only a campaign derives it)")
+    else:
+        iterations = spec["iterations"]
+    if iterations < 1:
         problems.append("spec: iterations must be at least 1")
     inputs = {rel(path): sha256_file(path)}
 
@@ -275,6 +316,8 @@ def resolve(ref, *, cpus, api_base=None, template_dir="<run>/resolved/prompt"):
         owned = [k for k in SEARCH_OWNED if k in search.get("openevolve", {})]
         if owned:
             problems.append(f"search: {', '.join(owned)} belong to the run spec or another profile, not the search profile")
+        if campaign and search.get("openevolve", {}).get("diff_based_evolution", True):
+            problems.append("search: a campaign generates full rewrites only; set diff_based_evolution: false")
 
     # Evaluator: a registered policy on a manifest, or a raw OpenEvolve evaluator file.
     ev = spec["evaluator"]
@@ -285,6 +328,12 @@ def resolve(ref, *, cpus, api_base=None, template_dir="<run>/resolved/prompt"):
         problems.append(f"evaluator: executor {executor!r} is not available (known: {', '.join(EXECUTORS)})")
     if parallel < 1 or per < 1:
         problems.append("evaluator: parallel_candidates and cpus_per_candidate must be at least 1")
+    elif campaign:
+        # Each candidate is its own array task on a CPU node, so only the node size limits it.
+        if per > NODE_CPUS:
+            problems.append(f"evaluator: cpus_per_candidate {per} exceeds a CPU node's {NODE_CPUS}")
+        if "openevolve_file" in ev:
+            problems.append("evaluator: a campaign evaluates with a registered policy, not openevolve_file")
     elif parallel * per + RESERVED_CPUS > cpus:
         problems.append(f"evaluator: {parallel} candidates x {per} CPUs + {RESERVED_CPUS} for OpenEvolve and the server "
                         f"needs {parallel * per + RESERVED_CPUS} CPUs; the job has {cpus}")
@@ -356,7 +405,7 @@ def resolve(ref, *, cpus, api_base=None, template_dir="<run>/resolved/prompt"):
 
     # Compose the OpenEvolve config: search profile, then derived and owned settings, then overrides.
     config = deep_merge({}, search["openevolve"])
-    config.update(max_iterations=spec["iterations"], language=language)
+    config.update(max_iterations=iterations, language=language)
     if max_code_length is not None:
         config["max_code_length"] = max_code_length
     config["llm"] = {
@@ -382,7 +431,7 @@ def resolve(ref, *, cpus, api_base=None, template_dir="<run>/resolved/prompt"):
     return {
         "spec_file": path, "spec": spec, "config": config, "inputs": inputs, "template_files": template_files,
         "prompt_dir": prompt_dir, "seed": seed, "language": language, "evaluator_file": evaluator_file,
-        "evaluator": evaluator_info, "manifest": manifest,
+        "evaluator": evaluator_info, "manifest": manifest, "campaign": campaign, "iterations": iterations,
         "model": {"profile": spec["model"], "server": model["LLM_SERVER"], "model_id": model["MODEL_ID"],
                   "revision": model["MODEL_REVISION"], "served_name": model["SERVED_MODEL_NAME"],
                   "context_tokens": model["CONTEXT_TOKENS"], "vllm_image": model["VLLM_IMAGE"],
@@ -430,6 +479,7 @@ def run_record(resolution, run_dir, api_base):
                    "templates": [f.name for f in resolution["template_files"]]},
         "search": {"profile": resolution["spec"]["search"]},
         "evaluator": resolution["evaluator"],
+        "campaign": resolution["campaign"],
         "inputs": resolution["inputs"],
         "resolved_config_sha256": config_digest(resolution["config"]),
         "project_commit": results.project_commit(),
@@ -609,6 +659,38 @@ def selftest():
         over = variant("ov", lambda d: d.update(overrides={"database.num_islands": 2}))
         case("override applied", lambda: expect(resolve(over, cpus=16)["config"]["database"]["num_islands"] == 2,
                                                 "override not applied"))
+
+        # Campaigns (M5): iterations derive from the generations; the evaluation's CPUs come from array tasks.
+        camp = {"generations": 3, "candidates_per_generation": 4}
+        def campaign_spec():
+            r = resolve(variant("cp", lambda d: (d.pop("iterations"), d.update(campaign=camp))), cpus=4)
+            expect(r["iterations"] == 12 and r["config"]["max_iterations"] == 12
+                   and r["campaign"]["max_task_retries"] == 2, f"campaign not derived: {r['campaign']}")
+        case("campaign derives iterations", campaign_spec)
+        case("campaign iterations mismatch", resolved(variant("cm", lambda d: d.update(campaign=camp))),
+             "must equal generations x candidates_per_generation")
+        # M6: limits and the heartbeat's floor.
+        def campaign_limits():
+            r = resolve(variant("cl", lambda d: (d.pop("iterations"), d.update(campaign={
+                **camp, "max_cpu_hours": 5000, "target_fitness": 1.25, "test": True, "heartbeat_minutes": 10}))), cpus=4)
+            expect(r["campaign"]["max_cpu_hours"] == 5000 and r["campaign"]["max_stage_retries"] == 2
+                   and r["campaign"]["min_free_gb"] == 200, f"limits not kept: {r['campaign']}")
+        case("campaign limits and defaults", campaign_limits)
+        case("campaign heartbeat under the floor", resolved(variant("ch", lambda d: (d.pop("iterations"), d.update(
+            campaign={**camp, "heartbeat_minutes": 10})))), "heartbeat_minutes 10 is below 60")
+        case("campaign limit not a number", resolved(variant("cs", lambda d: (d.pop("iterations"), d.update(
+            campaign={**camp, "max_cpu_hours": "5000"})))), "max_cpu_hours must be a number")
+        case("campaign limit not positive", resolved(variant("cz", lambda d: (d.pop("iterations"), d.update(
+            campaign={**camp, "max_wall_hours": 0})))), "must be above 0")
+        case("campaign task larger than a node", resolved(variant("cn", lambda d: (d.pop("iterations"), d.update(
+            campaign=camp), d["evaluator"].update(cpus_per_candidate=64)))), "exceeds a CPU node's 56")
+        case("campaign with an OpenEvolve file", resolved(variant("co", lambda d: (d.pop("iterations"), d.update(
+            campaign=camp)), base="toy-v1")), "not openevolve_file")
+        diff = (CONFIGS / "search" / "champsim-rewrite-v1.yaml").read_text().replace(
+            "diff_based_evolution: false", "diff_based_evolution: true")
+        (tmp / "diff-search.yaml").write_text(diff)
+        case("campaign in diff mode", resolved(variant("cd", lambda d: (d.pop("iterations"), d.update(
+            campaign=camp, search=str(tmp / "diff-search.yaml"))))), "full rewrites only")
 
         # Derived timeout for champsim_ipc comes from the policy's own limits.
         m = Manifest(CONFIGS / "experiments" / "crc2-evolve-v1.json")

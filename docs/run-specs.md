@@ -20,7 +20,7 @@ search: champsim-rewrite-v1         # configs/search/<name>.yaml
 evaluator:
   policy: compile_only              # a registered evaluator policy (evaluator/policies/)
   experiment: smoke-tiny-v1         # an experiment manifest (configs/experiments/)
-  executor: local                   # where candidates run: this node's CPUs (M5 adds slurm-array)
+  executor: local                   # where a single-job run's candidates run: this node's CPUs (campaigns use CPU arrays, docs/campaigns.md)
   parallel_candidates: 1
   cpus_per_candidate: 1
 iterations: 10
@@ -171,7 +171,7 @@ AFAR_LLM_FAKE=1 AFAR_CXX=<Spack g++ 12> SLURM_JOB_ID=12345 SLURM_SUBMIT_DIR=$PWD
 ```
 
 - `AFAR_LLM_FAKE_REPLY=<file>` makes the stand-in server answer with a fixed program.
-- The old `slurm/openevolve_toy.sbatch` and `openevolve_champsim_compile.sbatch` are wrappers around this job, with their R6 and R7 resources, until M5.
+- R6's and R7's own job scripts were wrappers around this job during M4, and were removed in M5.
 
 ## 5. Adding a part
 
