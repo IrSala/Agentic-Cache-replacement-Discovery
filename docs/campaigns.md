@@ -194,7 +194,7 @@ All are optional keys in the spec's `campaign:` section.
 | `heartbeat_minutes` | 60 | at least 60, or 10 with `test: true` |
 | `test` | false | allows test-only settings |
 
-Aggregation checks the limits after each generation, so one can be overshot by up to one generation. CPU- and GPU-hours come from `sacct` over every job in `events.jsonl`, array tasks included; heartbeats aren't counted. A budget halt can't be resumed, because the limits are part of the spec: to go further, start a new campaign from its last checkpoint.
+Aggregation checks the limits after each generation, so one can be overshot by up to one generation. The wall time can also be overshot by any wait for a GPU before that generation (`docs/status.md` issue 15). CPU- and GPU-hours come from `sacct` over every job in `events.jsonl`, array tasks included; heartbeats aren't counted. A budget halt can't be resumed, because the limits are part of the spec: to go further, start a new campaign from its last checkpoint.
 
 ## 7. Verified
 
@@ -223,6 +223,12 @@ M6 added these checks:
 **The M6 job scripts** ran on coe-hpc1 against a throwaway campaign, with stand-ins for `sbatch`, `squeue` and `sacct`. The heartbeat submitted its successor. The handler read a failed aggregation from `sacct`, then resubmitted it, with a new handler, as attempt 2.
 
 **The real stage scripts** ran one generation on coe-hpc1 with a stand-in `sbatch` that recorded each command.
+
+**On HPC3, M6 part C (2026-10-26 to 2026-10-28),** the 48-hour pilot `crc2-evolve-c1` ran unattended on `crc2-evolve-v1`. It ended on its wall-time limit, at 48.1 h, after 11 generations.
+- **Restarts:** handlers restarted three failed generation jobs, and nothing was resubmitted by hand. One was the injected failure at generation 2. The other two were failed submit checks at generation 10 (`docs/status.md` issue 16).
+- **A long wait:** one generation job waited 35.4 h for an A100 (issue 14). The heartbeat counted it as alive, as designed.
+
+Job IDs and full results are in `docs/status.md`.
 
 **On HPC3, M6 part B (2026-10-26),** `m6-dev-v1` passed all four of M6's short tests. Job IDs and full results are in `docs/status.md`.
 
