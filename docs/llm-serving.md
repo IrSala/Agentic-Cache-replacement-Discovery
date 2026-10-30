@@ -10,8 +10,8 @@ Measured by `slurm/discover_gpu.sbatch` (job 90582, node `cs002`) and `slurm/che
 |---|---|
 | GPU partitions | `gpuqs` (2 days), `gpuqm` (7 days), `gpuql` (14 days), all sharing the same nodes |
 | A100 nodes | `cs001`–`cs004`: 4× NVIDIA A100-PCIE-40GB each, 64 CPUs, 250 GB RAM |
-| Other GPUs | `g16`, `g18`, `g19`: 1× H100 each. `g1`–`g15`: 1× P100 each (compute capability 6.0, **not supported by vLLM**) |
-| Request used | `--partition=gpuqs --gres=gpu:a100:1` |
+| Other GPUs | `g16`, `g18`, `g19`: 1× H100 PCIe 80 GB each (compute capability 9.0; vLLM works, job 98572). `g1`–`g15`: 1× P100 each (compute capability 6.0, **not supported by vLLM**) |
+| Request used | campaigns: `--partition=gpuqs --gres=gpu:1 --exclude=g[1-15],cs002`, an A100 or an H100 (since 2026-10-29); single jobs: `--gres=gpu:a100:1`, or `gpu:h100:1` on the command line |
 | A100 compute capability | 8.0 |
 | GPU memory | 40960 MiB |
 | Driver / CUDA | 590.44.01 / CUDA 13.1 (runs CUDA 12.x containers) |
@@ -25,7 +25,7 @@ Measured by `slurm/discover_gpu.sbatch` (job 90582, node `cs002`) and `slurm/che
 
 ## Serving stack
 
-- **Server:** vLLM's official image (`vllm/vllm-openai`), pulled into a `.sif` with Apptainer. The A100's compute capability 8.0 meets vLLM's requirement.
+- **Server:** vLLM's official image (`vllm/vllm-openai`), pulled into a `.sif` with Apptainer. The A100's compute capability 8.0 and the H100's 9.0 meet vLLM's requirement and bf16's (8.0). The GPU preflight refuses anything older.
 - **Sizing:** a 7B-class instruct coder model in bf16 (about 15 GB of weights) fits in 40 GB with room for the KV cache.
 
 ## Pinned assets (R4)
@@ -91,6 +91,19 @@ The server log ends each run with an `EngineDeadError` at shutdown. That is expe
 | KV cache | 346,928 tokens: 21.2 requests at 16,384 tokens each, or about 42 at 8K |
 | One request via OpenEvolve's `LLMEnsemble` | 0.27 s, 14 completion tokens |
 | 8 concurrent requests | 112 completion tokens in 0.20 s. Replies were short, so this shows concurrency works; it doesn't measure throughput |
+
+**R5 on an H100** (job 98572, 2026-10-29, `g19`, the same image, model and settings, `--gres=gpu:h100:1`):
+
+| | H100 PCIe 80 GB | A100 (R5, above) |
+|---|---|---|
+| Preflight | compute capability 9.0, no ECC errors, 78.7 of 79.2 GiB free; driver 590.44.01, the same as the A100 nodes | |
+| Start to healthy | 100 s (weights 9.6 s, engine init 29.1 s, of which compilation 11.5 s; FLASH_ATTN backend) | 115 s |
+| GPU memory in use | 72,087 MiB of 81,559 | 35,829 MiB of 40,960 |
+| KV cache | 995,472 tokens: 60.8 requests at 16,384 tokens each | 346,928 tokens: 21.2 |
+| One request via OpenEvolve's `LLMEnsemble` | 0.21 s, 14 completion tokens | 0.27 s |
+| 8 concurrent requests | 112 completion tokens in 0.16 s | 0.20 s |
+
+All 10 requests returned `200`. Campaign generation jobs have taken an A100 or an H100 since this test (`docs/status.md`, issue 14).
 
 **R6** (job 93362, same server settings, OpenEvolve's real prompts, one request at a time):
 

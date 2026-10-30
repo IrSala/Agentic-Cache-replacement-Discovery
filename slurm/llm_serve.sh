@@ -35,7 +35,8 @@ export APPTAINERENV_CUDA_DEVICE_ORDER=PCI_BUS_ID
 
 # Check the allocated GPU before starting the server: log its health and run the
 # CUDA memory query vLLM starts with. Fails in seconds on an unusable GPU, e.g.
-# cs002 GPU 0, which had uncorrectable ECC errors (docs/llm-serving.md, R5).
+# cs002 GPU 0, which had uncorrectable ECC errors (docs/llm-serving.md, R5), or
+# on one older than compute capability 8.0, which bf16 models need (a P100 is 6.0).
 llm_gpu_preflight() {
     if llm_is_fake; then
         return 0
@@ -47,13 +48,21 @@ llm_gpu_preflight() {
     nvidia-smi -q -i "$gpu" | grep -E 'Compute Mode|Volatile|Uncorr|Remap|Pending|Failure|Recovery' || true
     echo "gpu preflight: compute processes on this node's GPUs:"
     nvidia-smi --query-compute-apps=gpu_bus_id,pid,used_memory --format=csv
-    if ! apptainer exec --nv "$sif" python3 -c '
-import torch
+    local rc=0
+    apptainer exec --nv "$sif" python3 -c '
+import sys, torch
 free, total = torch.cuda.mem_get_info()
 props = torch.cuda.get_device_properties(0)
 uuid = getattr(props, "uuid", "unknown")
-print(f"gpu preflight: CUDA ok on {props.name} (uuid GPU-{uuid}): {free / 2**30:.1f} of {total / 2**30:.1f} GiB free")
-'; then
+print(f"gpu preflight: CUDA ok on {props.name} (uuid GPU-{uuid}, compute capability {props.major}.{props.minor}): "
+      f"{free / 2**30:.1f} of {total / 2**30:.1f} GiB free")
+sys.exit(2 if (props.major, props.minor) < (8, 0) else 0)
+' || rc=$?
+    if (( rc == 2 )); then
+        echo "gpu preflight: FAILED: compute capability below 8.0 on $(hostname -s), too old for bf16 models." >&2
+        echo "  Ask for an A100 or H100 (--gres=gpu:a100:1 or gpu:h100:1), or exclude this node." >&2
+        return 1
+    elif (( rc != 0 )); then
         echo "gpu preflight: FAILED: GPU ${gpu} on $(hostname -s) is unusable (error above)." >&2
         echo "  Resubmit avoiding this node:  sbatch --exclude=$(hostname -s) <job script>" >&2
         echo "  and report the GPU to HPC support (see docs/llm-serving.md, R5)." >&2

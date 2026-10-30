@@ -40,8 +40,10 @@ knows is in its directory, written atomically, so any stage can be rerun:
 """
 
 import argparse
+import contextlib
 import datetime
 import hashlib
+import io
 import json
 import math
 import os
@@ -64,7 +66,10 @@ from evaluator.policies import InfraError, policy_class  # noqa: E402
 
 EXECUTORS = ("slurm", "local")
 LOCAL_EXECUTORS = {}             # campaign directory -> its LocalExecutor, shared by every stage in this process
-GENERATE_RESOURCES = {"partition": "gpuqs", "gres": "gpu:a100:1", "cpus-per-task": 4, "mem": "24G", "time": "00:30:00"}
+# Any GPU vLLM can use: an A100 or an H100 (job 98572), whichever frees first; the pilot's generation 5
+# waited 35.4 h for an A100 alone (docs/status.md, issue 14). gpuqs's P100s are always excluded.
+GENERATE_RESOURCES = {"partition": "gpuqs", "gres": "gpu:1", "cpus-per-task": 4, "mem": "24G", "time": "00:30:00"}
+NO_VLLM_NODES = ("g[1-15]",)     # gpuqs's P100 nodes: compute capability 6.0, below the 8.0 bf16 needs
 AGGREGATE_RESOURCES = {"partition": "cpuqs", "cpus-per-task": 1, "mem": "4G", "time": "00:20:00"}
 HANDLE_RESOURCES = {"partition": "cpuqs", "cpus-per-task": 1, "mem": "1G", "time": "00:10:00"}
 HEARTBEAT_RESOURCES = {"partition": "cpuqs", "cpus-per-task": 1, "mem": "1G", "time": "00:05:00"}
@@ -74,7 +79,9 @@ NAMED_WAIT_S = 60                # a job can start before its submitter records 
 NODE_FAULT_EXIT = "3"            # a generation job's exit status when its node looks unusable (campaign_generate.sbatch)
 # FAULTS (tests only): faults.json = {"infra": [{"generation": g, "index": i, "attempts": [1] or "all"}],
 #     "generate_fail": [{"generation": g, "attempts": [1]}], "aggregate_crash": [g, or {"generation": g, "attempts": [1]}],
-#     "aggregate_crash_after_save": [g, ...]}. attempts count a stage's job restarts (stage_attempt).
+#     "aggregate_crash_after_save": [g, ...], "generate_hold": [g, ...]}. attempts count a stage's job
+#     restarts (stage_attempt). generate_hold submits generation g's job held, as if it waited for a GPU
+#     until released (scontrol release <job>).
 
 
 class CampaignError(RuntimeError):
@@ -175,7 +182,9 @@ class Campaign:
                      "handle": HANDLE_RESOURCES}.get(stage) or self.evaluate_resources()
         exclude = set(kwargs.pop("exclude", ()))
         if stage == "generate":
-            exclude |= set(self.meta.get("exclude", []))
+            exclude |= set(self.meta.get("exclude", [])) | set(NO_VLLM_NODES)
+            if g in self.faults().get("generate_hold", []):
+                kwargs["hold"] = True
         job = self.executor().submit(stage, str(self.path), g, resources=resources, exclude=sorted(exclude), **kwargs)
         self.event("submitted", stage=stage, generation=g, job_id=job, exclude=sorted(exclude),
                    indices=kwargs.get("indices"), after=kwargs.get("after"))
@@ -293,13 +302,21 @@ def generate(c, g, api_base=None, needs_llm=False, job=None):
         return int(fault["exit"])
     if fault:
         raise CampaignError(f"injected by faults.json: the generation job of generation {g} failed")
+    # A job that waited in the queue past max_wall_hours ends the campaign instead of generating (issue 15).
+    late = current and not done and wall_time_up(c)
     if needs_llm:                                  # does the job need to start the model server?
-        return 0 if current and not done and not c.stopped() else 1
+        return 0 if current and not done and not c.stopped() and not late else 1
     if not current:
         print(f"generation {g} is not the current stage ({st['state']}, {st['stage']} {st['generation']}); nothing to do")
         return 0
     if c.stopped():
         c.halt("stopped", f"STOP file found before generating generation {g}")
+        return 0
+    if late:
+        summary = read_json(c.gen_dir(g - 1) / "summary.json", {"best_overall": None})
+        finish(c, g - 1, summary, "wall_time", (f"{wall_hours(c):.1f} h, the max_wall_hours of {c.param('max_wall_hours')}, "
+                                                f"when generation {g}'s job started, so it wasn't generated; "
+                                                f"best combined_score {summary['best_overall']}"))
         return 0
     if not done:
         if not api_base:
@@ -342,11 +359,12 @@ def generate(c, g, api_base=None, needs_llm=False, job=None):
                     tasks.append(cand)
             entries.append(entry)
         results.write_atomic(gd / "tasks.json", tasks)
+        gpu = os.environ.get("AFAR_GPU_NAME")     # set by campaign_generate.sbatch, so LLM times compare by GPU
         results.write_atomic(gd / "generation.json", {"generation": g, "llm_seconds": llm_seconds,
-                                                      "host": socket.gethostname(), "entries": entries})
+                                                      "host": socket.gethostname(), "gpu": gpu, "entries": entries})
         rejected = sum("rejected" in e for e in entries)
         c.event("generated", generation=g, candidates=len(entries), unique=len(tasks), rejected=rejected,
-                llm_seconds=llm_seconds)
+                llm_seconds=llm_seconds, gpu=gpu)
         print(f"generation {g}: {len(entries)} replies in {llm_seconds}s, {len(tasks)} unique candidates, "
               f"{rejected} rejected")
     tasks = read_json(gd / "tasks.json")
@@ -498,17 +516,26 @@ def record_usage(c):
     return cpu, gpu
 
 
+def wall_hours(c, end=None):
+    """Hours from the campaign's start to `end` (now by default)."""
+    end = end or datetime.datetime.now(datetime.timezone.utc)
+    return (end - datetime.datetime.fromisoformat(c.meta["created_at"])).total_seconds() / 3600
+
+
+def wall_time_up(c):
+    return bool(c.param("max_wall_hours")) and wall_hours(c) >= c.param("max_wall_hours")
+
+
 def limit_reached(c, g, summary):
     """("finished" or "halted", reason, message) if a stop condition holds after generation g, else None.
-    Checked once per generation, so a limit can be overshot by up to one generation."""
+    Checked once per generation, so a limit can be overshot by up to one generation; the wall time is
+    checked again when the next generation's job starts (generate)."""
     best = summary["best_overall"]
     target = c.param("target_fitness")
     if target is not None and best is not None and best >= target:
         return "finished", "target", f"best combined_score {best} reached target_fitness {target} after generation {g}"
-    hours = (datetime.datetime.now(datetime.timezone.utc)
-             - datetime.datetime.fromisoformat(c.meta["created_at"])).total_seconds() / 3600
-    if c.param("max_wall_hours") and hours >= c.param("max_wall_hours"):
-        return "finished", "wall_time", (f"{hours:.1f} h, the max_wall_hours of {c.param('max_wall_hours')}, "
+    if wall_time_up(c):
+        return "finished", "wall_time", (f"{wall_hours(c):.1f} h, the max_wall_hours of {c.param('max_wall_hours')}, "
                                          f"after generation {g}; best combined_score {best}")
     try:
         cpu, gpu = record_usage(c)
@@ -663,6 +690,17 @@ def heartbeat(c, job=None):
     c.submit_heartbeat()                 # first, so a check that fails can't end the chain
     stage_job, handler_job = c.stage_jobs()
     live = c.executor().alive([stage_job, handler_job])
+    # Why a queued stage job waits, for campaign-status (issue 14), which reads files only: squeue
+    # takes 18 s to fail on coe-hpc1. An aggregation waiting on its array (Dependency) is expected.
+    waiting = None
+    if stage_job in live:
+        try:
+            wait = c.executor().pending(stage_job)
+        except ExecutorError as e:
+            wait = None
+            print(f"heartbeat {job}: could not read job {stage_job}'s queue state: {e}", file=sys.stderr)
+        if wait and wait["reason"] != "Dependency":
+            waiting = {"job": stage_job, **wait}
     age = (datetime.datetime.now(datetime.timezone.utc)
            - datetime.datetime.fromisoformat(st["updated_at"])).total_seconds()
     action = "ok"
@@ -681,8 +719,10 @@ def heartbeat(c, job=None):
                     handler_job=handler_job, minutes=round(age / 60))
             restart_stage(c)
             action = "restarted"
-    results.write_atomic(path, {**read_json(path, {}), "last_run": now(), "last_job": job, "last_action": action})
-    print(f"heartbeat {job}: {action} ({st['stage']} {st['generation']}, live jobs {live})")
+    results.write_atomic(path, {**read_json(path, {}), "last_run": now(), "last_job": job, "last_action": action,
+                                "waiting": waiting})
+    print(f"heartbeat {job}: {action} ({st['stage']} {st['generation']}, live jobs {live})"
+          + (f"; job {stage_job} pending ({waiting['reason']})" if waiting else ""))
     return 0
 
 
@@ -739,9 +779,11 @@ def show_status(c):
     elif hb:
         print(f"  heartbeat: every {c.param('heartbeat_minutes')} min; last ran {hb.get('last_run', 'not yet')}"
               f" ({hb.get('last_action', '-')}); next job {hb.get('next')}")
-    end = datetime.datetime.now(datetime.timezone.utc) if st["state"] == "running" \
-        else datetime.datetime.fromisoformat(st["updated_at"])
-    hours = (end - datetime.datetime.fromisoformat(c.meta["created_at"])).total_seconds() / 3600
+        wait = hb.get("waiting")
+        if wait and st["state"] == "running" and wait["job"] == c.stage_jobs()[0]:
+            print(f"  waiting: job {wait['job']} was pending" + (f" {wait['hours']:.1f} h" if wait["hours"] is not None
+                                                                else "") + f" ({wait['reason']}) at the last heartbeat")
+    hours = wall_hours(c, None if st["state"] == "running" else datetime.datetime.fromisoformat(st["updated_at"]))
     used = [f"{hours:.1f} h" + (f" of max_wall_hours {c.param('max_wall_hours')}" if c.param("max_wall_hours") else "")]
     budget = read_json(c.path / "budget.json")
     if budget:
@@ -826,7 +868,7 @@ def selftest(keep=False):
         print(f"  {'ok  ' if ok else 'FAIL'}  {name:<52} {detail}")
 
     saved = {k: os.environ.get(k) for k in ("AFAR_RESULTS", "AFAR_LLM_API_BASE", "AFAR_LLM_API_KEY", "AFAR_MAIL_USER",
-                                            "PATH", "FAKE_SBATCH_FAIL", "FAKE_SBATCH_REJECT")}
+                                            "PATH", "FAKE_SBATCH_FAIL", "FAKE_SBATCH_REJECT", "FAKE_SQUEUE_OUT")}
     saved_globals = (NAMED_WAIT_S, STALL_GRACE_S, free_gb, SlurmExecutor.retry_delays)
     NAMED_WAIT_S = STALL_GRACE_S = 0     # local jobs start when named, and a local run can't wait 10 min
     tmp = Path(tempfile.mkdtemp(prefix="afar-campaign-selftest-"))
@@ -952,8 +994,12 @@ def selftest(keep=False):
         fails = [e for e in events if e["event"] == "stage_failed"]
         jobs = [e for e in events if e["event"] == "submitted" and e["stage"] == "generate"]
         check("(M6 a) a failed generation job is restarted", cg.status["state"] == "finished" and len(fails) == 2
-              and len(jobs) == 3 and [j["exclude"] for j in jobs] == [[], [], ["localhost"]],
+              and len(jobs) == 3 and [j["exclude"] for j in jobs] == [["g[1-15]"], ["g[1-15]"], ["g[1-15]", "localhost"]],
               f"{len(fails)} failure(s), excludes {[j['exclude'] for j in jobs]}")
+        gen_jobs = [s for s in cg.executor().submitted if s["stage"] == "generate"]
+        check("(issue 14) generation jobs take any GPU, never a P100", gen_jobs and all(
+            s["resources"].get("gres") == "gpu:1" and "g[1-15]" in s["exclude"] for s in gen_jobs),
+              f"{gen_jobs[0]['resources'].get('gres')}, excludes {gen_jobs[0]['exclude']}" if gen_jobs else "none")
 
         # (M6 c) the stage job and its handler vanish without failing: only the heartbeat can notice.
         cs = start(variant("s", generations=1), name="selftest-s", executor="local")
@@ -989,7 +1035,7 @@ def selftest(keep=False):
             'if (( n <= ${FAKE_SBATCH_FAIL:-0} )); then\n'
             '    echo "sbatch: error: Batch job submission failed: Socket timed out on send/recv operation" >&2; exit 1\nfi\n'
             'echo $(( 7000 + n ))\n')
-        (fake / "squeue").write_text("#!/bin/bash\nexit 0\n")
+        (fake / "squeue").write_text('#!/bin/bash\n[[ -n "${FAKE_SQUEUE_OUT:-}" ]] && echo "$FAKE_SQUEUE_OUT"\nexit 0\n')
         for f in ("sbatch", "squeue"):
             (fake / f).chmod(0o755)
         os.environ.update(PATH=f"{fake}:{saved['PATH']}", FAKE_SBATCH_FAIL="2")
@@ -1017,6 +1063,40 @@ def selftest(keep=False):
         except ExecutorError:
             rejected = True
         check("(M6 d) a rejected sbatch is not retried", rejected and int((fake / "count").read_text()) == 8)
+        os.environ.pop("FAKE_SBATCH_REJECT")
+
+        # (issues 14, 15) a generation job's Slurm request: any GPU but a P100, held when a test asks.
+        (cz.path / "faults.json").write_text(json.dumps({"generate_hold": [1]}))
+        cz.submit_generation(1)
+        gen = next((s for s in (fake / "sbatch.log").read_text().splitlines() if "campaign_generate.sbatch" in s), "")
+        check("(issue 14) the generation job's Slurm flags", all(x in gen for x in (
+            "--partition=gpuqs", "--gres=gpu:1", "--exclude=g[1-15]", "--hold")) and "a100" not in gen, gen[-90:])
+        # (issue 14) why a queued job waits, from squeue; nothing for a running job.
+        submitted = datetime.datetime.now() - datetime.timedelta(hours=2)
+        os.environ["FAKE_SQUEUE_OUT"] = f"PENDING|Priority|{submitted.isoformat(timespec='seconds')}"
+        wait = SlurmExecutor(cz.path, 4).pending("7009")
+        os.environ["FAKE_SQUEUE_OUT"] = f"RUNNING|None|{submitted.isoformat(timespec='seconds')}"
+        running = SlurmExecutor(cz.path, 4).pending("7009")
+        check("(issue 14) a pending job's reason and wait, from squeue", wait and wait["reason"] == "Priority"
+              and round(wait["hours"], 1) == 2.0 and running is None, str(wait))
+        os.environ.pop("FAKE_SQUEUE_OUT")
+
+        # (issue 16) the generation job's submit check retries, keeps the errors, and isn't a node fault.
+        def generate_job(fail):
+            (fake / "count").write_text("0")
+            env = dict(os.environ, FAKE_SBATCH_FAIL=str(fail), AFAR_SUBMIT_CHECK_DELAYS="0 0 0", AFAR_REPO=str(ROOT),
+                       AFAR_CAMPAIGN=str(c.path), AFAR_GENERATION="1", SLURM_JOB_ID="selftest")
+            return subprocess.run(["bash", str(ROOT / "slurm" / "campaign_generate.sbatch")], env=env,
+                                  capture_output=True, text=True, timeout=300)
+        out = generate_job(2)
+        check("(issue 16) a submit check that fails twice is retried", out.returncode == 0
+              and out.stderr.count("submit check: sbatch --test-only failed: sbatch: error: Batch job submission "
+                                   "failed: Socket timed out") == 2 and out.stdout.rstrip().endswith("done"),
+              f"exit {out.returncode}")
+        out = generate_job(4)
+        check("(issue 16) four failed checks: exit 1, not a node fault", out.returncode == 1
+              and out.stderr.count("submit check: sbatch --test-only failed") == 4
+              and "failed 4 times" in out.stderr, f"exit {out.returncode}")
         for k in ("PATH", "FAKE_SBATCH_FAIL", "FAKE_SBATCH_REJECT"):
             os.environ.pop(k, None) if saved[k] is None else os.environ.__setitem__(k, saved[k])
         SlurmExecutor.retry_delays = saved_globals[3]
@@ -1054,6 +1134,38 @@ def selftest(keep=False):
         os.environ["AFAR_LLM_API_BASE"] = f"http://127.0.0.1:{port + 1}/v1"
         ends("no-progress", "halted", "no_progress", generation=1, max_failed_generations=1)
         os.environ["AFAR_LLM_API_BASE"] = f"http://127.0.0.1:{port}/v1"
+
+        # (issue 15) generation 1's job waits (held) until the campaign is past max_wall_hours: when it
+        # starts, it ends the campaign without the model, instead of running one more generation.
+        cw = start(variant("late", generations=2, max_wall_hours=1), name="selftest-late", executor="local")
+        (cw.path / "faults.json").write_text(json.dumps({"generate_hold": [1]}))
+        drain_local(cw)
+        held = cw.status["stage_job"]
+        check("(issue 15) a held generation job waits, alive", cw.status["stage"] == "generating"
+              and cw.executor().alive([held]) == [held] and generate(Campaign(cw.path), 1, needs_llm=True) == 0,
+              f"{cw.status['stage']} {cw.status['generation']}, {cw.executor().pending(held)}")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            show_status(Campaign(cw.path))
+        waiting = [l.strip() for l in out.getvalue().splitlines() if "waiting:" in l]
+        check("(issue 14) campaign-status shows why the stage job waits", read_json(cw.path / "heartbeat.json")
+              .get("waiting", {}).get("reason") == "JobHeldUser" and len(waiting) == 1
+              and f"job {held} was pending 0.0 h (JobHeldUser) at the last heartbeat" in waiting[0],
+              waiting[0] if waiting else "no waiting line")
+        meta = read_json(cw.path / "campaign.json")      # as if the job waited 2 h in the queue
+        meta["created_at"] = (datetime.datetime.now(datetime.timezone.utc)
+                              - datetime.timedelta(hours=2)).isoformat(timespec="seconds")
+        results.write_atomic(cw.path / "campaign.json", meta)
+        needs_llm = generate(Campaign(cw.path), 1, needs_llm=True)
+        cw.executor().release(held)
+        drain_local(cw)
+        st = cw.status
+        check("(issue 15) a generation job that starts late ends the campaign", needs_llm == 1
+              and st["state"] == "finished" and st.get("reason") == "wall_time"
+              and "when generation 1's job started" in st.get("message", "")
+              and not (cw.gen_dir(1) / "generation.json").exists()
+              and not any(s["stage"] == "evaluate" and s["generation"] == 1 for s in cw.executor().submitted),
+              f"needs model: {needs_llm == 0}; {st['state']} ({st.get('reason')}): {(st.get('message') or '')[:60]}")
 
         # (M6 f) stop --now cancels the stage's jobs and halts at once: no retry, no mail.
         cn = start(variant("now", generations=1), name="selftest-now", executor="local")

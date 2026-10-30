@@ -1,0 +1,24 @@
+# After the pilot: the generation-job fixes (docs/status.md issues 14-16) on HPC3. As
+# m6-dev-v1, plus a 30-min wall-time limit, so a held generation job can start past it
+# (faults.json {"generate_hold": [2]}) and end the campaign without generating.
+#     make oe-check SPEC=m6-dev-v2
+#     make campaign-start SPEC=m6-dev-v2 NAME=<id> EXCLUDE=cs001,cs002,cs003,cs004   (on g17)
+spec_version: 1
+description: Generation-job fixes (issues 14-16) on the 4-trace dev manifest
+seed: seeds/evolved_repl.h
+model: qwen2.5-coder-7b-v1
+prompt: champsim-rewrite-v1
+search: champsim-rewrite-v1
+evaluator:
+  policy: champsim_ipc
+  experiment: crc2-dev-v1
+  cpus_per_candidate: 4
+campaign:
+  generations: 2
+  candidates_per_generation: 24   # 8 per island with the search profile's 3 islands
+  max_concurrent_tasks: 40
+  max_task_retries: 2
+  max_stage_retries: 2
+  max_wall_hours: 0.5
+  test: true
+  heartbeat_minutes: 10

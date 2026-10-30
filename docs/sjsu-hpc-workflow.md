@@ -61,8 +61,8 @@ On coe-hpc1 the Spack modules may not be on `MODULEPATH` in non-interactive shel
 | `defq` (default) | 6 h, **at most 2 CPUs per node** | `c1`–`c20` (56 cores, ~112–128 GB each) and `homacs1`–`4` (128 cores, ~251 GB each): 1,632 CPU cores. Default memory 1 GB per CPU |
 | `cpuqs` / `cpuqm` / `cpuql` | 5 / 14 / 21 days | same CPU nodes |
 | `gpuqs` / `gpuqm` / `gpuql` | 2 / 7 / 14 days | `cs001`–`cs004`, `g1`–`g16`, `g18`–`g19` |
-| `nsfqs` / `nsfqm` / `nsfql` | 2 / 14 / 21 days | `g20`–`g32` (not characterized here) |
-| `condo` | 30 days | `condo1`, `condo3`–`11`. Faculty-owned; your jobs can be preempted by the owner |
+| `nsfqs` / `nsfqm` / `nsfql` | 2 / 14 / 21 days | `g20`–`g32`: 1 H100 and 96 CPUs each. Open to every user (`AllowGroups=ALL`), with its own QOS, `nsf3nodes`. The name suggests NSF-funded hardware; SJSU's guide doesn't mention these partitions, so ask your advisor or the HPC admins before relying on them |
+| `condo` | 30 days | `condo1`, `condo3`–`11`. Faculty-owned; the owner's jobs preempt yours (section 2.3.1) |
 
 **CPU nodes differ in speed** *(measured)*. The same single-threaded simulation took 2.6–4.2 h depending on the node, with identical results: `homacs3` was fastest and `c1` slowest. Size `--time` for the slowest node.
 
@@ -71,7 +71,7 @@ The GPU partitions mix three kinds of GPU:
 | GPU | Nodes | Request with | Notes |
 |---|---|---|---|
 | NVIDIA A100-PCIE-40GB | `cs001`–`cs004`, 4 per node (64 CPUs, ~250 GB RAM) | `--gres=gpu:a100:1` | compute capability 8.0; driver 590.44.01, CUDA ≤ 13.1 |
-| H100 | `g16`, `g18`, `g19`, 1 per node | `--gres=gpu:h100:1` | |
+| NVIDIA H100 PCIe 80 GB | `g16` (512 CPUs, 1 TB RAM), `g18`, `g19` (192 CPUs, 512 GB), 1 per node; also `g20`–`g32` in `nsfq*` | `--gres=gpu:h100:1` | compute capability 9.0; driver 590.44.01. vLLM works (job 98572) |
 | P100 | `g1`–`g15`, 1 per node | `--gres=gpu:p100:1` | compute capability 6.0; too old for vLLM and many recent frameworks |
 
 A plain `--gres=gpu:1` matches **any** type: P100, A100 or H100. On 2026-10-22, other users' `gpu:1` jobs held A100s on `cs001` and `cs003`. Name the type you need. GPU nodes have a local SSD at `/tmp` (`$TMPDIR`, about 370 GB on `cs002`). **`cs002` GPU 0 is faulty** (uncorrectable ECC errors, 2026-10-15/21), so submit GPU jobs with `--exclude=cs002` until it's repaired.
@@ -79,7 +79,8 @@ A plain `--gres=gpu:1` matches **any** type: P100, A100 or H100. On 2026-10-22, 
 **A100s can be booked for a day or more** *(measured 2026-10-27)*:
 - **What was seen:** other users' jobs held all 12 A100s outside `cs002`, with 10–27 h left, and 15 more A100 jobs were queued. A 30-minute job had waited 9 h with reason `Priority`, and Slurm estimated its start 27 h later. Meanwhile `cs002`'s 4 A100s sat idle, and only one H100 job was running.
 - **Why a short job didn't jump the queue:** backfill starts a job early only if it fits in a gap before higher-priority jobs' planned starts, and long jobs leave no gaps.
-- **What to do:** if your software runs on more than one GPU type, accept any of them. For example, `--gres=gpu:1 --exclude=g[1-15],cs002` asks for an A100 or an H100 (not yet tested). Check the GPU queue before any plan that depends on getting a GPU quickly (section 4).
+- **What to do:** if your software runs on more than one GPU type, accept any of them. For example, `--gres=gpu:1 --exclude=g[1-15],cs002` asks for an A100 or an H100; campaign generation jobs do this since 2026-10-29. Check the GPU queue before any plan that depends on getting a GPU quickly (section 4).
+- **A snapshot** *(2026-10-29, `sinfo -O NodeList,Gres,GresUsed,StateCompact`)*: 4 A100s free (all on `cs004`), 1 of 3 `gpuqs` H100s and 3 of 13 `nsfq*` H100s. 9 of the 15 P100 nodes were down.
 
 **Per-user limits** (`sacctmgr show qos format=Name,MaxTRESPerUser,MaxJobsPerUser`):
 - `gpuqs` uses the `gpu3nodes` QOS (`scontrol show partition gpuqs`), which allows **2 nodes per user**: at most two 4×A100 nodes, or 8 A100s, at once. `nsf3nodes` has the same cap.
@@ -88,6 +89,13 @@ A plain `--gres=gpu:1` matches **any** type: P100, A100 or H100. On 2026-10-22, 
 - **Memory can block a GPU job while GPUs are free** *(measured)*. A100 nodes have about 250 GB of RAM, shared by their 4 GPUs. On 2026-10-22, the nodes with a free A100 had only 27–59 GB left unallocated, so a 64G request waited for hours (`Resources`) and a 24G request started at once.
   - A vLLM job serving a 7B model peaked at about 4 GB of host RAM, because the weights and cache live on the GPU.
   - Request what `sacct` measured, plus a margin.
+
+#### 2.3.1 Priority and preemption *(measured 2026-10-29 with `scontrol show config`, `scontrol -a show partition` and `sacctmgr show qos`)*
+
+- **Preemption is by QOS:** `PreemptType=preempt/qos`, `PreemptMode=REQUEUE`. A preempted job goes back to the queue and later reruns from the start, so job steps must be safe to repeat (campaign stages are).
+- **Only condo owners preempt.** The `condo8_pr…` QOS has priority 100000 and preempts `gpu3nodes` jobs (the list was cut off at that width); `condo9_pr…` has the same priority and preempts nothing. SJSU's guide says an owner's job signals other users' jobs on their condo node and stops them within 5 minutes. No `gpuqs` node is in an owner's partition, and no partition is hidden; `chemq` (`cchem1`–`3`) is limited to its group.
+- **Partition tiers only order scheduling:** `PriorityTier` is 30 for `gpuqs`, `cpuqs` and `nsfqs`, 20 for the `*qm` partitions, 10 for the `*ql` ones (and 40 for `defq`, 1 for `condo`). On shared nodes, a short-queue job is considered before a long-queue one.
+- **Cores can be shared:** every partition has `OverSubscribe=FORCE:4`, which lets Slurm place up to 4 jobs on one core. This may explain why the same simulation ran at different speeds on different nodes (above); it hasn't been checked.
 
 ### 2.4 Storage
 
@@ -326,7 +334,8 @@ This repository applies the guide end to end. See `README.md` for details.
 
 ## Sources
 
-- SJSU CoE HPC, user guide and access: https://www.sjsu.edu/cmpe/resources/hpc.php
+- SJSU CoE HPC, user guide and access: https://www.sjsu.edu/cmpe/resources/hpc.php (404 since late October 2026; archived copy of 2026-10-22: http://web.archive.org/web/20261022222743/https://www.sjsu.edu/cmpe/resources/hpc.php). Its partition table predates HPC3, so trust `sinfo` over it
+- Slurm preemption (`preempt/qos`, `REQUEUE`, `PriorityTier`): https://slurm.schedmd.com/preempt.html
 - HPC Carpentry, Introduction to HPC (concepts, login vs compute nodes, schedulers): https://carpentries-incubator.github.io/hpc-intro/
 - Slurm `sbatch` (export default, dependencies including `singleton`, `--begin`, `--kill-on-invalid-dep`, arrays, `--parsable`): https://slurm.schedmd.com/sbatch.html
 - Slurm job arrays: https://slurm.schedmd.com/job_array.html

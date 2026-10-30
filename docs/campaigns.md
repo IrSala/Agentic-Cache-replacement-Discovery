@@ -38,13 +38,15 @@ export AFAR_MAIL_USER=<you>@sjsu.edu
 make campaign-start SPEC=m5-dev-v1
 ```
 
-`EXCLUDE=cs002` is the default, which keeps generation jobs off that node's faulty GPU. `NAME=<id>` sets the campaign ID; otherwise it's `<spec>-<date>-<time>`.
+Generation jobs take whichever A100 or H100 frees first, and never a P100 node (`g1`–`g15`), which vLLM can't use. `EXCLUDE=cs002` is the default, which keeps them off that node's faulty GPU. `NAME=<id>` sets the campaign ID; otherwise it's `<spec>-<date>-<time>`.
 
 To check on it, from either cluster:
 
 ```bash
 make campaign-status C=<id>
 ```
+
+It shows the state, each generation's results, the heartbeat, the time and CPU- and GPU-hours used against the limits, and, when the stage's job is still queued, Slurm's reason and how long it had waited at the last heartbeat.
 
 To halt it after the current stage (this writes a `STOP` file):
 
@@ -76,11 +78,11 @@ start ──► evaluate(0) = the seed ──► aggregate(0) ──► generate
 
 | Stage | Job | What it does |
 |---|---|---|
-| `generate(g)` | `slurm/campaign_generate.sbatch`: 1 A100, 4 CPUs, 24 GB, 30 min | Starts the model server from the spec's model profile and loads the newest checkpoint. It samples one parent per candidate, round-robin over the islands, and builds each prompt as OpenEvolve's worker does. It sends all the prompts at once, since vLLM batches them. Each reply is parsed as a full rewrite. A reply with no code, an exact copy of its parent, or code over `max_code_length` is recorded as rejected and never evaluated. Then it submits the evaluation and the aggregation |
+| `generate(g)` | `slurm/campaign_generate.sbatch`: 1 A100 or H100 (`--gres=gpu:1`, P100 nodes excluded), 4 CPUs, 24 GB, 30 min | Starts the model server from the spec's model profile and loads the newest checkpoint. It samples one parent per candidate, round-robin over the islands, and builds each prompt as OpenEvolve's worker does. It sends all the prompts at once, since vLLM batches them. Each reply is parsed as a full rewrite. A reply with no code, an exact copy of its parent, or code over `max_code_length` is recorded as rejected and never evaluated. Then it submits the evaluation and the aggregation |
 | `evaluate(g)` | `slurm/campaign_evaluate.sbatch`: an array, one task per unique candidate; `cpus_per_candidate` CPUs, 1 GB each (at least 2 GB); the policy's worst-case time + 10 min | `evaluate_candidate` with the spec's policy: M2's records, statuses and cache. Exits 0 for any candidate outcome and 1 for an infrastructure failure |
 | `aggregate(g)` | `slurm/campaign_aggregate.sbatch`: 1 CPU, 4 GB, 20 min, `afterany` on the array | Retries missing evaluations, or adds every program in iteration order, as OpenEvolve's controller does. It saves the checkpoint and the generation's `summary.json`, then submits `generate(g+1)`, finishes or halts |
 
-Jobs submit the next stage themselves; compute nodes can run `sbatch`, as M0 showed. The generation job checks that with `sbatch --test-only` before starting the server.
+Jobs submit the next stage themselves; compute nodes can run `sbatch`, as M0 showed. The generation job checks that with `sbatch --test-only` before starting the server. It tries up to 4 times, 10, 30 and 60 s apart, and logs each error; if every try fails, it exits 1, an ordinary failure, since a busy controller is the likelier cause than the node (`docs/status.md` issue 16). The GPU it ran on is recorded in `generation.json` and the `generated` event, so LLM times can be compared by GPU.
 
 **Two differences from `openevolve-run`:**
 - **Shared parent pool:** all candidates of a generation are sampled from the same database state. Fewer, larger generations mean fewer GPU start-ups, but the database is updated less often.
@@ -134,6 +136,7 @@ That makes:
 - task 3 of generation 1 fail its first attempt
 - every aggregation of generation 2 crash before saving; `{"generation": 2, "attempts": [1]}` makes only the first crash
 - the first generation job of generation 2 fail before it starts the model server; `"exit": 3` makes it fail as a node check does, so its restart avoids the node
+- `"generate_hold": [2]` (not in the example) submits generation 2's job held, standing in for a long wait for a GPU, until you run `scontrol release <job>`
 
 `"attempts": "all"` makes a failure persistent. For `infra`, attempts count a task's evaluations; for the others, a stage job's restarts (`stage_attempt`).
 
@@ -143,7 +146,7 @@ That makes:
 - if the job succeeds, Slurm removes the handler, unrun
 - if the job fails, times out, runs out of memory or loses its node, the handler runs. It reads how the job ended from `sacct` and logs a `stage_failed` event. Then it restarts the job (attempt 2, 3, …) or, past `max_stage_retries`, halts the campaign with `stage_failed`, naming the job, its Slurm state, exit code, node and log
 
-A generation job's restart is kept off its node only on evidence the node is bad: the job exited 3, which its script does when the node can't submit jobs, the GPU preflight fails, or the model server won't start; or Slurm reports `NODE_FAIL` or `BOOT_FAIL`. After any other failure, the restart may run anywhere. HPC3 has only four A100 nodes, and excluding a good one can leave no free GPU: in the M6 tests, a restart that excluded `cs001` after an injected failure was given an estimated start 1.5 days away, while `cs001` was the only node with free A100s.
+A generation job's restart is kept off its node only on evidence the node is bad: the job exited 3, which its script does when the GPU preflight fails (an unusable GPU, or one below compute capability 8.0) or the model server won't start; or Slurm reports `NODE_FAIL` or `BOOT_FAIL`. After any other failure, including a submit check that failed 4 times, the restart may run anywhere. Excluding a good node can leave no free GPU: in the M6 tests, a restart that excluded `cs001` after an injected failure was given an estimated start 1.5 days away, while `cs001` was the only node with free A100s.
 
 Evaluation arrays need no handler: their aggregation already waits with `afterany` and retries missing tasks.
 
@@ -151,13 +154,14 @@ Evaluation arrays need no handler: their aggregation already waits with `afteran
 1. ends the chain if the campaign has finished or halted
 2. submits its successor first, `heartbeat_minutes` later, so a check that fails can't end the chain
 3. if neither the stage's job nor its handler is queued or running, and `status.json` hasn't changed for 10 min, restarts the stage, or halts with `stalled` past `max_stage_retries`
+4. if the stage's job is still queued, records Slurm's reason and how long it has waited in `heartbeat.json`, which `campaign-status` shows. `campaign-status` itself reads only files, so it works from either cluster (on coe-hpc1, `squeue` takes 18 s to fail)
 
 It checks no limits; aggregation does that once per generation.
 
 **Shared-compute safeguards:**
 - **One at a time:** each campaign's heartbeats share one job name, `afar-heartbeat-<id>`, with `--dependency=singleton`, so Slurm never runs two at once. A heartbeat that finds another one already due ends without a successor.
 - **An interval floor:** `heartbeat_minutes` is at least 60 (10 only in a spec with `test: true`).
-- **Small footprint:** 1 CPU for 4–6 s per run (measured in M6 part B), about 24 jobs and 2 CPU-minutes a day, and one `squeue` an hour. Between runs, one pending job holds no resources.
+- **Small footprint:** 1 CPU for 4–6 s per run (measured in M6 part B), about 24 jobs and 2 CPU-minutes a day, and two `squeue` calls an hour. Between runs, one pending job holds no resources.
 - **Easy removal:** `scancel --name=afar-heartbeat-<id>`.
 
 These follow the guidance found when M6 was planned: SJSU has no rule on periodic jobs; Cirrus sets a 60 s floor on scheduler polling; NERSC restarts its workflow processes hourly through `scrontab`, which HPC3 has disabled.
@@ -194,7 +198,7 @@ All are optional keys in the spec's `campaign:` section.
 | `heartbeat_minutes` | 60 | at least 60, or 10 with `test: true` |
 | `test` | false | allows test-only settings |
 
-Aggregation checks the limits after each generation, so one can be overshot by up to one generation. The wall time can also be overshot by any wait for a GPU before that generation (`docs/status.md` issue 15). CPU- and GPU-hours come from `sacct` over every job in `events.jsonl`, array tasks included; heartbeats aren't counted. A budget halt can't be resumed, because the limits are part of the spec: to go further, start a new campaign from its last checkpoint.
+Aggregation checks the limits after each generation, so one can be overshot by up to one generation. The wall time is checked again when a generation job starts: a job that waited in the queue past `max_wall_hours` ends the campaign as `finished (wall_time)` without starting the model (`docs/status.md` issue 15). So the wall time can be overshot by a queue wait, but not by another generation. CPU- and GPU-hours come from `sacct` over every job in `events.jsonl`, array tasks included; heartbeats aren't counted. A budget halt can't be resumed, because the limits are part of the spec: to go further, start a new campaign from its last checkpoint.
 
 ## 7. Verified
 
@@ -218,11 +222,21 @@ M6 added these checks:
 - each stop condition ends the campaign with its reason: target, wall time, budget (which can't be resumed), storage, no progress
 - `stop --now` halts at once, with no retry and no mail
 
+The fixes after the pilot (`docs/status.md` issues 14–16) added these:
+- generation jobs ask for `--gres=gpu:1`, exclude the P100 nodes as well as the campaign's own and any a handler excluded, and carry `--hold` when a test asks
+- a pending job's Slurm reason and wait are read from `squeue`, recorded by the heartbeat, and shown by `campaign-status`
+- a generation job held until the campaign is past `max_wall_hours` doesn't ask for the model when it starts; it ends the campaign as `finished (wall_time)`, and generates and submits nothing
+- the real `slurm/campaign_generate.sbatch`, with a stand-in `sbatch`: a submit check that fails twice is retried and the job goes on; one that fails 4 times exits 1, with every error in the log
+
 `controller.runspec --selftest` checks the new keys, including that a heartbeat under the floor is refused.
 
 **The M6 job scripts** ran on coe-hpc1 against a throwaway campaign, with stand-ins for `sbatch`, `squeue` and `sacct`. The heartbeat submitted its successor. The handler read a failed aggregation from `sacct`, then resubmitted it, with a new handler, as attempt 2.
 
 **The real stage scripts** ran one generation on coe-hpc1 with a stand-in `sbatch` that recorded each command.
+
+**On HPC3, after the pilot (2026-10-29),** `fix-dev-a` (spec `m6-dev-v2`) tested the fixes for issues 14–16:
+- **An H100:** with every A100 node excluded, generation 1 ran on `g18`'s H100, and `generation.json` recorded the GPU.
+- **The wall time:** generation 2's job was submitted held. The heartbeat recorded the hold, and `campaign-status` showed it. Released past the limit, the job ended the campaign as `finished (wall_time)` without starting the model.
 
 **On HPC3, M6 part C (2026-10-26 to 2026-10-28),** the 48-hour pilot `crc2-evolve-c1` ran unattended on `crc2-evolve-v1`. It ended on its wall-time limit, at 48.1 h, after 11 generations.
 - **Restarts:** handlers restarted three failed generation jobs, and nothing was resubmitted by hand. One was the injected failure at generation 2. The other two were failed submit checks at generation 10 (`docs/status.md` issue 16).
