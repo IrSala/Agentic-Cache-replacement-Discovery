@@ -1,0 +1,34 @@
+# The acceptance run for crc2-evolve-c2, with the duplicate screen on: c2's model, prompt, search
+# and 42 candidates x 8 CPUs, for 2 generations. It checks c2's CPU use on HPC3 (docs/campaigns.md,
+# section 8) and the screen's first real run (docs/levers/evaluation/duplicate-screen.md).
+# crc2-evolve-c2.yaml itself is unchanged.
+#
+# The screen runs bzip2_183B first, the only trace with no wrong match in the pilot's replay, and
+# reuses a known behavior's scores when it matches. audit_every is 2 here, not the default 10, so
+# half the matches still run every trace: this run is for evidence. An audit costs what a full
+# evaluation costs without the screen. Generation 1 can match only the seed's behavior (LRU), so
+# most of the matches will come in generation 2.
+#     make oe-check SPEC=crc2-evolve-c2-screen-test
+#     make campaign-start SPEC=crc2-evolve-c2-screen-test NAME=crc2-evolve-c2-screen-test   (on g17, with AFAR_MAIL_USER set)
+# Afterwards: make campaign-report, campaign-diversity and campaign-screen with C=crc2-evolve-c2-screen-test.
+spec_version: 1
+description: crc2-evolve-c2 acceptance run, 2 generations with the duplicate screen on (bzip2, audit every 2nd)
+seed: seeds/evolved_repl.h
+model: qwen2.5-coder-7b-v1
+prompt: champsim-rewrite-v1
+search: champsim-rewrite-v1
+evaluator:
+  policy: champsim_ipc
+  experiment: crc2-evolve-v1
+  cpus_per_candidate: 8
+  duplicate_screen:
+    trace: bzip2_183B
+    audit_every: 2
+campaign:
+  generations: 2
+  candidates_per_generation: 42     # 14 per island with the search profile's 3 islands
+  max_concurrent_tasks: 42          # 42 x 8 = 336 CPUs, the pilot's footprint
+  max_task_retries: 2
+  max_stage_retries: 2
+  max_wall_hours: 12                # 2 generations take about 2 h, without a wait for a GPU
+  max_cpu_hours: 1000               # about 2 x the estimate without the screen

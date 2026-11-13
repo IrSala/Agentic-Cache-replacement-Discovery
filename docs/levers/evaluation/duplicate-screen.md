@@ -111,7 +111,9 @@ Two members of each of the pilot's three largest behaviors kept identical cycles
 ## Decision and next step
 
 - **Class:** result-identical if the screening trace separates behaviors. So it gets a run-spec switch, off by default (`../README.md`).
-- **Next:** decide which campaign uses it first. The proposal is `crc2-evolve-c2`'s 2-generation acceptance run, through its own spec, then `make campaign-screen` on its records.
+- **Next:** the first run on HPC3 is `crc2-evolve-c2`'s 2-generation acceptance run, through its own spec, `crc2-evolve-c2-screen-test` (decided 2026-11-13). It audits every second match, so half the matches still run every trace as evidence.
+  - Generation 1 can match only the seed's behavior (LRU), so most matches will come in generation 2.
+  - Afterwards: `campaign-report`, `campaign-diversity` and `campaign-screen` on it, and any `screen_false_match` events.
 - **Open questions:**
   - Should it screen on two strong separators (bzip2 plus omnetpp or soplex) for margin? The screen would then take as long as the slower of the two.
   - Should the trace be re-chosen from each campaign's replay?

@@ -414,6 +414,7 @@ A checkpoint can hold fewer programs than were added. When a program takes over 
 **The duplicate screen** builds on this: run one trace first, and skip the other 13 when its result matches a behavior the campaign has already measured.
 - **On the pilot:** `make campaign-screen C=crc2-evolve-c1 CPUS=8` replays it from the records. Screening on bzip2, 83 of 162 new candidates match an earlier generation's behavior with no wrong match, skipping 61% of the simulation. bzip2 is the only trace without a wrong match.
 - **Built (2026-11-13), off by default:** a run spec turns it on with `evaluator.duplicate_screen`. It's tested locally, not yet run on HPC3.
+- **First run on HPC3:** `crc2-evolve-c2-screen-test`, c2's acceptance run (2 generations, about 478 CPU-hours estimated without the screen). It screens on bzip2 and audits every second match.
 - **Still to run:** the same replay on `crc2-evolve-c2`'s records.
 - The design, the evidence and the decisions are in `docs/levers/evaluation/duplicate-screen.md`.
 
