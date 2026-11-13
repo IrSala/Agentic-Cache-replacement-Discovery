@@ -65,7 +65,7 @@ CHAMPSIM_LDFLAGS := -static-libstdc++ -static-libgcc
 .PHONY: help setup submodules python venvs vcpkg champsim check check-runtime smoke \
         env-record lock clean distclean oe-check oe-check-config oe-toy-manual oe-summary oe-compile-selftest \
         evaluator-selftest evaluate-selftest baseline-local llm-fetch traces-fetch \
-        campaign-start campaign-status campaign-stop campaign-resume campaign-report campaign-estimate campaign-selftest mail-test
+        campaign-start campaign-status campaign-stop campaign-resume campaign-report campaign-estimate campaign-diversity campaign-selftest mail-test
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -177,6 +177,10 @@ campaign-report: venvs ## What a campaign's jobs did with their CPUs and GPU: pe
 campaign-estimate: venvs ## A spec's CPU-hours and time per candidate, per generation and in all, before it runs (SPEC=<name>)
 	@[ -n "$(SPEC)" ] || { echo "usage: make campaign-estimate SPEC=crc2-evolve-c2" >&2; exit 2; }
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.report estimate $(SPEC)
+
+campaign-diversity: venvs ## How many different behaviors a campaign found, judged by its per-trace results (C=<id>)
+	@[ -n "$(C)" ] || { echo "usage: make campaign-diversity C=crc2-evolve-c1" >&2; exit 2; }
+	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.diversity $(C)
 
 campaign-selftest: venvs ## The staged pipeline end to end on this host: fake LLM, local executor, injected faults (~2 min)
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.oe_adapter --selftest

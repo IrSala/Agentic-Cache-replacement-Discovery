@@ -988,6 +988,23 @@ def selftest(keep=False):
               and est["candidate_minutes"] > 0 and not est["warnings"]
               and any("max_cpu_hours" in w for w in warned["warnings"]), (warned["warnings"] or ["no warning"])[0][:60])
 
+        # (diversity) behaviors from per-trace results (controller/diversity.py): identical cycle vectors are
+        # one behavior; 0.05% apart is another unless the threshold is 0.1%; and this campaign's candidates
+        # group the same way by cycles and by LLC misses.
+        from controller import diversity as dv
+        va, vb, vc = (100000, 200000), (100050, 200000), (110000, 200000)
+        check("(diversity) thresholds: 0.05% apart is distinct at 0.01%, merged at 0.1%",
+              len(dv.complete_linkage([va, vb, vc], 0.0001)) == 3 and len(dv.complete_linkage([va, vb, vc], 0.001)) == 2)
+        check("(diversity) Hill and Vendi: two equal, distant behaviors count 2; one behavior counts 1",
+              round(dv.hill([5, 5], 1), 6) == 2 and dv.hill([9, 1], 2) < 1.25
+              and round(dv.vendi([va, vc], [3, 3], 0.001), 6) == 2 and round(dv.vendi([va], [4], 0.001), 6) == 1)
+        div = dv.diversity(c)
+        d = div["diversity"]
+        check("(diversity) campaign-diversity: behaviors per generation; misses group as cycles do",
+              0 < d["behaviors"] <= d["candidates"] and [r["generation"] for r in div["generations"]] == [0, 1, 2, 3]
+              and div["cross_check"]["agree"] and div["separation"] is not None,
+              f"{d['candidates']} candidates, {d['behaviors']} behaviors, {div['cross_check']['candidates']} with miss data")
+
         # (c) a persistent failure halts with a clear status.
         c2 = start(spec_path, name="selftest-c", executor="local")
         (c2.path / "faults.json").write_text(json.dumps({"infra": [{"generation": 0, "index": 0, "attempts": "all"}]}))

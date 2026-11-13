@@ -342,3 +342,77 @@ A checkpoint can hold fewer programs than were added. When a program takes over 
 - [The Qwen2.5-Coder technical report (model sizes)](https://arxiv.org/abs/2409.12186)
 - [Chen et al., Teaching Large Language Models to Self-Debug](https://arxiv.org/abs/2304.05128)
 - [Olausson et al., Is Self-Repair a Silver Bullet for Code Generation?](https://arxiv.org/abs/2306.09896)
+
+## 9. Behavioral diversity
+
+**Counting behaviors.** `make campaign-diversity C=<id>` reads only the campaign's files, so it works from either cluster.
+- **A behavior:** ChampSim is deterministic. Cycles reproduce across nodes (M3) and CPU counts (§8). So candidates with identical cycles on every trace made the same replacement decisions there, and count as one behavior. Their LLC miss counts must group them the same way, and the report checks it.
+- **Diversity numbers:**
+  - richness: the number of distinct behaviors
+  - Hill numbers of order 1 and 2 over the behaviors' candidate counts: the effective number of behaviors, as ecology counts species
+  - richness after merging behaviors within 0.1% or 1% of each other on every trace (complete linkage on the largest per-trace |log| cycle ratio)
+  - the Vendi score: Hill 1 of a Gaussian similarity on log cycles, with scale 0.1%
+- **Per generation:**
+  - new behaviors and repeats
+  - replies whose changed code behaved exactly like their parent
+  - behaviors so far
+  - behaviors in the population OpenEvolve kept (the generation's checkpoint)
+- **Also reported:**
+  - behaviors per island
+  - good behaviors: above LRU and within 1% of the best
+  - how many behaviors each trace, or set of traces, separates
+  - code distance against behavior distance
+  - the largest behaviors, with their members
+- **Options:** `--json` for scripts; `--thresholds` changes the merge thresholds.
+
+**The pilot** (`make campaign-diversity C=crc2-evolve-c1`, about 1 min):
+
+| Measure | Value |
+|---|---|
+| Candidates scored on all 14 traces | 125 of 162 |
+| Behaviors | 42; 38 within 0.1%, 30 within 1% |
+| Effective number: Hill 1, Hill 2; Vendi | 16.0, 6.8; 14.1 |
+| Same grouping by LLC misses | yes |
+| Largest behavior | 43 candidates at fitness 1.041264, first found in generation 2, on all 3 islands |
+| Good behaviors (above LRU, within 1% of the best) | 13, with 73 candidates; 32 behaviors above LRU |
+
+**What it showed:**
+- **Code distance is a weak stand-in.**
+  - Pairs with the same behavior still differ in a median 26% of their EVOLVE-BLOCK lines; pairs with different behaviors, 54%.
+  - Spearman correlation with behavior distance: 0.39 for line distance, 0.19 for OpenEvolve's own diversity measure.
+  - In the largest group, the extra fields only break ties between blocks last used in the same cycle, so they never changed a decision.
+- **The population OpenEvolve kept narrowed while the LLM kept finding new behaviors.**
+  - The campaign reached 42 behaviors. The kept population's distinct behaviors peaked at 24 (generations 6–7) and fell to 18 by generation 10.
+  - New behaviors per generation fell from 7 to 3.
+  - Replies that behaved exactly like their parent rose from 4 of 11 (generation 1) to 10–14 of 17–22 (generations 7–10).
+  - DivEval reports the same pattern: diverse generation, narrowing retention.
+- **Islands rarely found the same behaviors:** 15 of 17, 9 of 11 and 15 of 18 behaviors were found on one island only.
+- **One trace separates all 42:** bzip2, with a median run of 553 s. Any 7 of the 14 traces separate 39–42. Distances need more traces than identity does.
+
+**Caveats:**
+- A behavior is relative to the traces and their length. Two candidates may tie on these 14 windows and differ elsewhere: a false merge. The first check below tests this.
+- Exact identity counts tiny differences as new behaviors. Report the 0.1% and 1% counts beside it.
+- Only candidates with every trace completed have a behavior.
+
+**Checks still to run:**
+- **False merges, on HPC3:**
+  - **What runs:** the two most code-different members of each of the three largest behaviors, plus the LRU baseline. The manifest is `crc2-long3-v1`: bzip2, sphinx3 and xalancbmk at `crc2-validate-v1`'s length (50M + 200M instructions, about 3.6× the evolution length).
+  - **Cost:** about 15 CPU-hours simulating (about 23 held) in one 3-CPU job of about 8 hours.
+  - **Pass:** members stay identical.
+- **On `crc2-evolve-c2`:** whether one trace still separates every behavior. If so, a duplicate screen could run that trace first and skip the rest when it matches the parent. It would cost about 0.16 CPU-hours per candidate; in the pilot, candidates that matched their parent's score took about 41% of evaluation CPU.
+
+**Why per-trace identity:**
+- **What papers use to compare LLC policies:** speedup, hit rate or MPKI per workload; the share of the gap to Belady's optimal policy closed (EVA); or agreement with optimal decisions (Hawkeye, Glider, Parrot, LRB).
+- **No standard compares two policies' behavior directly.** One thesis reports hit-set overlap (IoU 0.97 for PRRIP vs RRIP).
+- **LLM-driven LLC search** measures diversity in code (CacheFit) or not at all (CacheForge).
+- The finer measures need a replay of LLC access streams, not yet built.
+
+The sources are in `research_notes/` (`LLC policy and evolutionary search metrics/` and `Policy comparison beyond IPC/`).
+
+**Sources:**
+- [Hill (1973), Diversity and evenness](https://doi.org/10.2307/1934352)
+- [Vendi score](https://arxiv.org/abs/2210.02410)
+- [DivEval](https://neurips.cc/virtual/2026/175781)
+- [CacheFit](https://arxiv.org/abs/2610.10579)
+- [CacheForge](https://arxiv.org/html/2610.07668)
+- [EVA](https://people.csail.mit.edu/sanchez/papers/2017.eva.hpca.pdf)
