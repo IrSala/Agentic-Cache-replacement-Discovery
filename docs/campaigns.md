@@ -390,15 +390,27 @@ A checkpoint can hold fewer programs than were added. When a program takes over 
 - **One trace separates all 42:** bzip2, with a median run of 553 s. Any 7 of the 14 traces separate 39–42. Distances need more traces than identity does.
 
 **Caveats:**
-- A behavior is relative to the traces and their length. Two candidates may tie on these 14 windows and differ elsewhere: a false merge. The first check below tests this.
+- A behavior is relative to the traces and their length. Two candidates may tie on these 14 windows and differ elsewhere: a false merge. The check below found none in the three largest behaviors.
 - Exact identity counts tiny differences as new behaviors. Report the 0.1% and 1% counts beside it.
 - Only candidates with every trace completed have a behavior.
 
-**Checks still to run:**
-- **False merges, on HPC3:**
-  - **What runs:** the two most code-different members of each of the three largest behaviors, plus the LRU baseline. The manifest is `crc2-long3-v1`: bzip2, sphinx3 and xalancbmk at `crc2-validate-v1`'s length (50M + 200M instructions, about 3.6× the evolution length).
-  - **Cost:** about 15 CPU-hours simulating (about 23 held) in one 3-CPU job of about 8 hours.
-  - **Pass:** members stay identical.
+**False-merge check (HPC3 job 113482, 2026-11-13): passed.**
+- **What ran:** the two most code-different members of each of the three largest behaviors, plus the LRU baseline. The manifest is `crc2-long3-v1`: bzip2, sphinx3 and xalancbmk at `crc2-validate-v1`'s length (50M + 200M instructions, about 3.6× the evolution length).
+- **Cost:** 12.4 CPU-hours simulating, in 5 h 05 min on one node.
+- **Result:** each pair kept identical cycles and LLC misses on all three traces.
+
+| Behavior (pilot size) | Members run | bzip2 cycles | sphinx3 cycles | xalancbmk cycles |
+|---|---|---|---|---|
+| LRU baseline | — | 148,616,354 | 362,274,279 | 170,691,391 |
+| 43 (fitness 1.041264) | d7bbc6dfe4365bec, 4204ce8c80bfe7a4 | 157,044,182 | 239,144,090 | 174,661,371 |
+| 15 (fitness 0.98128) | 8a8849b107bfd849, fb99028262829b89 | 175,499,768 | 273,254,410 | 186,201,644 |
+| 7 (fitness 1.0) | ca752eebcb89083f, f31db84a59ae36ff | 148,616,354 | 362,274,279 | 170,691,391 |
+
+- **The 7-member behavior is LRU.** All 7 candidates also match the LRU baseline exactly on the 14 pilot traces, so their changes never altered a decision.
+- **The largest behavior's gain here comes from one trace:** 34% fewer cycles than LRU on sphinx3, but 5.7% more on bzip2 and 2.3% more on xalancbmk.
+- **Limit:** three behaviors and three traces at one longer length. Other workloads could still separate members.
+
+**Check still to run:**
 - **On `crc2-evolve-c2`:** whether one trace still separates every behavior. If so, a duplicate screen could run that trace first and skip the rest when it matches the parent. It would cost about 0.16 CPU-hours per candidate; in the pilot, candidates that matched their parent's score took about 41% of evaluation CPU.
 
 **Why per-trace identity:**
