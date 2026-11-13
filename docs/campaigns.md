@@ -302,6 +302,7 @@ A checkpoint can hold fewer programs than were added. When a program takes over 
 | Builds, aggregation, the heartbeat | about 12 s per task; seconds; about 2 CPU-min a day | negligible |
 
 **Traces run longest first (since 2026-10-29).**
+- **Lever record:** `docs/levers/evaluation/trace-order.md`.
 - **How:** the `champsim_ipc` policy starts a candidate's traces in order of their LRU baseline's run time, longest first (`run_order` in `evaluator/policies/champsim_ipc.py`). It returns their records in the manifest's order, so a candidate's outcome doesn't depend on the order.
 - **Why it works:** this is longest-processing-time-first (LPT) scheduling. On k CPUs, the long traces start at once and the short ones fill the gaps, so a candidate on fewer CPUs than traces can still finish when its slowest trace does.
 - **The replay:** the pilot's 125 completed candidates, each with its own measured trace times:
@@ -410,8 +411,10 @@ A checkpoint can hold fewer programs than were added. When a program takes over 
 - **The largest behavior's gain here comes from one trace:** 34% fewer cycles than LRU on sphinx3, but 5.7% more on bzip2 and 2.3% more on xalancbmk.
 - **Limit:** three behaviors and three traces at one longer length. Other workloads could still separate members.
 
-**Check still to run:**
-- **On `crc2-evolve-c2`:** whether one trace still separates every behavior. If so, a duplicate screen could run that trace first and skip the rest when it matches the parent. It would cost about 0.16 CPU-hours per candidate; in the pilot, candidates that matched their parent's score took about 41% of evaluation CPU.
+**The duplicate screen** builds on this: run one trace first, and skip the other 13 when its result matches a behavior the campaign has already measured.
+- **On the pilot:** `make campaign-screen C=crc2-evolve-c1 CPUS=8` replays it from the records. Screening on bzip2, 83 of 162 new candidates match an earlier generation's behavior with no wrong match, skipping 61% of the simulation. bzip2 is the only trace without a wrong match.
+- **Still to run:** the same replay on `crc2-evolve-c2`'s records.
+- The design, the evidence and the decisions are in `docs/levers/evaluation/duplicate-screen.md`.
 
 **Why per-trace identity:**
 - **What papers use to compare LLC policies:** speedup, hit rate or MPKI per workload; the share of the gap to Belady's optimal policy closed (EVA); or agreement with optimal decisions (Hawkeye, Glider, Parrot, LRB).

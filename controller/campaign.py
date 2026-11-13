@@ -1005,6 +1005,34 @@ def selftest(keep=False):
               and div["cross_check"]["agree"] and div["separation"] is not None,
               f"{d['candidates']} candidates, {d['behaviors']} behaviors, {div['cross_check']['candidates']} with miss data")
 
+        # (screen) the duplicate screen replayed (diversity.screen_rows): a candidate matches only behaviors that
+        # earlier generations completed; a screening result two behaviors share is ambiguous and never screened;
+        # a match that differs elsewhere is a wrong match; a match frees its CPUs once the screening trace ends.
+        def rec(cycles, misses, run_s, status="completed"):
+            return {"status": status, "cycles": cycles, "misses": misses, "run_s": run_s}
+        A = {"s": rec(10, 1, 10), "x": rec(100, 5, 100)}
+        A2 = {"s": rec(10, 1, 10), "x": rec(100, 5, 100)}
+        B = {"s": rec(10, 1, 10), "x": rec(101, 5, 100)}               # same on s, different on x
+        F = {"s": rec(10, 1, 10), "x": rec(None, None, 50, "timeout")}  # same on s, failed on x
+        C = {"s": rec(20, 2, 10), "x": rec(100, 5, 100)}
+        gens = [(0, [("a", A), ("c", C)]), (1, [("a2", A2), ("b", B), ("f", F)]), (2, [("a3", A2)])]
+        r = dv.screen_rows(gens, ["s", "x"], ["x", "s"], "s", 2)
+        same_gen = dv.screen_rows([(0, [("a", A), ("a2", A2)])], ["s", "x"], ["x", "s"], "s", 2)
+        both = dv.screen_rows([(0, [("a", A)]), (1, [("b", B)]), (2, [("a2", A2)])], ["s", "x"], ["x", "s"], "s", 2)
+        check("(screen) replay: matches, wrong matches, and CPUs freed",
+              r["matches"] == 3 and r["wrong"] == 2 and r["ambiguous"] == 1 and {w["why"] for w in r["wrong_matches"]}
+              == {"differs on another trace", "failed on another trace"} and r["held_freed_cpu_hours"] > 0,
+              f"{r['matches']} matches, {r['wrong']} wrong")
+        check("(screen) replay: no match within a generation; a shared screening result becomes ambiguous",
+              same_gen["matches"] == 0 and both["wrong"] == 1 and both["ambiguous"] == 1
+              and dv.screen_rows([(0, [("a", A), ("b", B)]), (1, [("a2", A2)])], ["s", "x"], ["x", "s"], "s", 2)
+              ["ambiguous"] == 1)
+        rep = dv.screen_replay(c)
+        check("(screen) campaign-screen: every trace replayed on this campaign",
+              len(rep["per_trace"]) == len(c.manifest()["traces"])
+              and all(t["matches"] <= t["candidates"] for t in rep["per_trace"]),
+              f"{len(rep['per_trace'])} traces, detail {(rep['detail'] or {}).get('trace')}")
+
         # (c) a persistent failure halts with a clear status.
         c2 = start(spec_path, name="selftest-c", executor="local")
         (c2.path / "faults.json").write_text(json.dumps({"infra": [{"generation": 0, "index": 0, "attempts": "all"}]}))

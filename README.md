@@ -159,6 +159,7 @@ sbatch --exclude=cs002 --export=ALL,SPEC=champsim-compile-v1 slurm/openevolve.sb
 | `campaign-status C=…` / `campaign-stop C=…` / `campaign-resume C=…` | a campaign's state, generations, heartbeat and use / halt it after the current stage (`NOW=1`: cancel its jobs and halt now) / resubmit its current stage |
 | `campaign-report C=…` / `campaign-estimate SPEC=…` | what a campaign's jobs did with their CPUs and GPU, per generation and per trace (`SACCT=1` on g17 adds Slurm's view) / a spec's CPU-hours and time before it runs (`docs/campaigns.md` §8) |
 | `campaign-diversity C=…` | how many different behaviors a campaign's candidates showed, judged by their per-trace results, per generation and island (`docs/campaigns.md` §9) |
+| `campaign-screen C=… [TRACE=…] [CPUS=…]` | replay the duplicate screen on a campaign's records: matches, wrong matches and CPU-hours saved for each trace as the screen (`docs/levers/evaluation/duplicate-screen.md`) |
 | `campaign-selftest` | the staged pipeline end to end on coe-hpc1: fake LLM, local executor, injected faults, the watchdog and stop conditions (~1.5 min) |
 | `mail-test` | on g17: test mail delivery to `$AFAR_MAIL_USER`, from a CPU node and from Slurm (M6) |
 | `oe-check-config` | load the hand-written `configs/openevolve/*.yaml` with OpenEvolve's loader; fail on unknown keys |
@@ -239,6 +240,7 @@ docs/experiment-contract.md     candidate format, manifest, result schema, fitne
 docs/trace-calibration.md       M3: the CRC-2 trace suite, the calibration rules and their results
 docs/run-specs.md               M4: run specs, the swappable parts, and how to add one
 docs/campaigns.md               M5–M6: staged campaigns (GPU generates, CPU arrays evaluate), their state, failure handling, watchdog and limits
+docs/levers/                    one document per research lever, by pipeline stage, and when a lever gets a run-spec switch
 external/ChampSim/              ChampSim submodule
 runs/                           OpenEvolve output, one directory per job (ignored by git)
 logs/                           Slurm job logs (contents ignored by git)

@@ -65,7 +65,7 @@ CHAMPSIM_LDFLAGS := -static-libstdc++ -static-libgcc
 .PHONY: help setup submodules python venvs vcpkg champsim check check-runtime smoke \
         env-record lock clean distclean oe-check oe-check-config oe-toy-manual oe-summary oe-compile-selftest \
         evaluator-selftest evaluate-selftest baseline-local llm-fetch traces-fetch \
-        campaign-start campaign-status campaign-stop campaign-resume campaign-report campaign-estimate campaign-diversity campaign-selftest mail-test
+        campaign-start campaign-status campaign-stop campaign-resume campaign-report campaign-estimate campaign-diversity campaign-screen campaign-selftest mail-test
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -181,6 +181,10 @@ campaign-estimate: venvs ## A spec's CPU-hours and time per candidate, per gener
 campaign-diversity: venvs ## How many different behaviors a campaign found, judged by its per-trace results (C=<id>)
 	@[ -n "$(C)" ] || { echo "usage: make campaign-diversity C=crc2-evolve-c1" >&2; exit 2; }
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.diversity $(C)
+
+campaign-screen: venvs ## Replay the duplicate screen on a campaign's records (C=<id>, optional TRACE=<trace>, CPUS=<n>)
+	@[ -n "$(C)" ] || { echo "usage: make campaign-screen C=crc2-evolve-c1 [TRACE=bzip2_183B] [CPUS=8]" >&2; exit 2; }
+	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.diversity $(C) --screen $(TRACE) $(if $(CPUS),--cpus $(CPUS))
 
 campaign-selftest: venvs ## The staged pipeline end to end on this host: fake LLM, local executor, injected faults (~2 min)
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.oe_adapter --selftest

@@ -3,6 +3,7 @@ policies a campaign found, judged by what they did on its traces rather than how
 It reads files only, so it works from either cluster.
 
     python -m controller.diversity CAMPAIGN [--json] [--thresholds 0.001,0.01]
+    python -m controller.diversity CAMPAIGN --screen [TRACE] [--cpus N] [--json]
 
 ChampSim is deterministic, so a candidate's cycle counts on the campaign's traces fingerprint its
 behavior there: candidates with identical cycles on every trace made the same replacement
@@ -27,6 +28,15 @@ code         code distance for pairs of candidates with the same behavior and wi
              ones: 1 - difflib's line ratio over the EVOLVE-BLOCK, and OpenEvolve 0.4.0's
              _fast_code_diversity; and their Spearman correlation with behavior distance.
 groups       the largest behaviors: candidates, fitness, first generation, islands, members.
+
+--screen replays the duplicate screen on the campaign's records instead
+(docs/levers/evaluation/duplicate-screen.md): each new candidate, in order, is screened on one
+trace against the behaviors earlier generations completed. A match would reuse that behavior's
+scores; a wrong match is a candidate whose screening result matched but whose other traces
+differed or failed. Every trace is tried as the screen; the detail is for TRACE (default: the
+trace with no wrong matches that saves the most). CPU time is modeled at --cpus per candidate
+(default: the campaign's), from the records' run times, in the evaluator's longest-first order
+with the screening trace started first.
 """
 
 import argparse
@@ -44,8 +54,9 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from controller import campaign as cp  # noqa: E402
 from controller import runspec  # noqa: E402
-from controller.report import trace_records  # noqa: E402
+from controller.report import makespan, trace_records  # noqa: E402
 from evaluator import evaluate_candidate as ec  # noqa: E402
+from evaluator.policies.champsim_ipc import run_order  # noqa: E402
 
 DEFAULT_THRESHOLDS = (0.001, 0.01)
 GOOD_WITHIN = 0.01        # "good": above LRU and within 1% of the campaign's best fitness
@@ -352,6 +363,127 @@ def diversity(c, thresholds=DEFAULT_THRESHOLDS):
             "islands": islands, "good": good_rep, "separation": sep, "code": code_rep, "groups": groups}
 
 
+# --- the duplicate screen, replayed ---------------------------------------------
+
+AMBIGUOUS = "ambiguous"
+
+
+def screen_rows(generations, traces, order, screen, cpus):
+    """The duplicate screen replayed on recorded results.
+
+    generations: [(generation, [(candidate, {trace: {status, cycles, misses, run_s}})])], each
+    candidate once, at its first appearance. order: the traces longest first. A candidate can
+    match only behaviors that earlier generations completed on every trace, since a generation's
+    candidates run at the same time. A screening result shared by two different behaviors is
+    ambiguous and never screened. Times are the records' run seconds on `cpus` CPUs."""
+    rest = [t for t in order if t != screen]
+    index, out, wrong = {}, dict(candidates=0, matches=0, ambiguous=0, simulated_s=0.0, skipped_s=0.0,
+                                 stopped_s=0.0, held_s=0.0, held_freed_s=0.0, held_added_s=0.0), []
+    for g, cands in generations:
+        found = {}
+        for cand, recs in cands:
+            if not recs:
+                continue
+            out["candidates"] += 1
+            times = {t: (recs.get(t) or {}).get("run_s") or 0.0 for t in traces}
+            complete = all((recs.get(t) or {}).get("status") == "completed" for t in traces)
+            vector = tuple(recs[t]["cycles"] for t in traces) if complete else None
+            full = makespan([times[t] for t in order], cpus)
+            out["simulated_s"] += sum(times.values())
+            out["held_s"] += cpus * full
+            s = recs.get(screen) or {}
+            key = (s.get("cycles"), s.get("misses")) if s.get("status") == "completed" else None
+            hit = index.get(key) if key else None
+            if hit == AMBIGUOUS:
+                out["ambiguous"] += 1
+                hit = None
+            if hit is not None:
+                out["matches"] += 1
+                if vector != hit:
+                    wrong.append({"generation": g, "candidate": cand,
+                                  "why": "failed on another trace" if vector is None else "differs on another trace",
+                                  "distance": None if vector is None else round(distance(vector, hit), 6)})
+                st = times[screen]
+                stopped = sum(min(times[t], st) for t in rest[:max(0, cpus - 1)])
+                out["skipped_s"] += sum(times.values()) - st
+                out["stopped_s"] += stopped
+                out["held_freed_s"] += cpus * (full - st)
+            else:
+                out["held_added_s"] += cpus * (makespan([times[screen]] + [times[t] for t in rest], cpus) - full)
+            if vector is not None and key:
+                found.setdefault(key, set()).add(vector)
+        for key, vectors in found.items():
+            known = index.get(key)
+            if known == AMBIGUOUS or len(vectors) > 1 or (known is not None and known not in vectors):
+                index[key] = AMBIGUOUS
+            elif known is None:
+                index[key] = next(iter(vectors))
+    hours = {k: round(v / 3600, 1) for k, v in out.items() if k.endswith("_s")}
+    return {"trace": screen, "cpus": cpus, "candidates": out["candidates"], "matches": out["matches"],
+            "wrong": len(wrong), "wrong_matches": wrong, "ambiguous": out["ambiguous"],
+            "worst_wrong": max((w["distance"] if w["distance"] is not None else math.inf for w in wrong), default=None),
+            "behaviors_indexed": sum(v != AMBIGUOUS for v in index.values()),
+            "ambiguous_keys": sum(v == AMBIGUOUS for v in index.values()),
+            **{k.replace("_s", "_cpu_hours"): v for k, v in hours.items()}}
+
+
+def screen_replay(c, trace=None, cpus=None):
+    manifest = c.manifest()
+    traces = [t["id"] for t in manifest["traces"]]
+    if trace and trace not in traces:
+        raise ValueError(f"{trace} is not one of {manifest.experiment_id}'s traces")
+    root = ec.results_root()
+    evals = root / "evaluations" / manifest.experiment_id / c.meta["evaluator"]["policy"]
+    baselines = ec.load_baselines(manifest, root / "baselines" / manifest.experiment_id)
+    order = [t["id"] for t in run_order(manifest["traces"], baselines)]
+    cpus = cpus or c.meta["evaluator"]["cpus_per_candidate"]
+    gens = sorted(int(p.name) for p in (c.path / "generations").glob("*") if p.name.isdigit())
+    seen, generations = set(), []
+    for g in gens:
+        cands = []
+        for e in (cp.read_json(c.gen_dir(g) / "generation.json", {}) or {}).get("entries", []):
+            cand = e.get("candidate_id")
+            if cand and cand not in seen:
+                seen.add(cand)
+                recs = {t: {"status": r.get("status"), "cycles": r.get("cycles"), "run_s": r.get("run_seconds"),
+                            "misses": llc_misses(r) if r.get("status") == "completed" else None}
+                        for t, r in trace_records(evals, cand).items()}
+                cands.append((cand, recs))
+        generations.append((g, cands))
+    per_trace = [screen_rows(generations, traces, order, t, cpus) for t in traces]
+    clean = [r for r in per_trace if r["wrong"] == 0]
+    best = max(clean, key=lambda r: r["held_freed_cpu_hours"] - r["held_added_cpu_hours"], default=None)
+    detail = next(r for r in per_trace if r["trace"] == trace) if trace else best
+    return {"campaign": c.id, "experiment": manifest.experiment_id, "traces": len(traces), "cpus": cpus,
+            "per_trace": per_trace, "detail": detail}
+
+
+def print_screen(r):
+    print(f"duplicate screen replayed on {r['campaign']} ({r['experiment']}, {r['traces']} traces), "
+          f"modeled at {r['cpus']} CPUs per candidate")
+    print("  screening trace            matches  wrong (largest gap)  ambiguous  simulation skipped  held CPU-h freed (net)")
+    for t in sorted(r["per_trace"], key=lambda t: (t["wrong"], -(t["held_freed_cpu_hours"] - t["held_added_cpu_hours"]))):
+        net = round(t["held_freed_cpu_hours"] - t["held_added_cpu_hours"], 1)
+        gap = "" if t["worst_wrong"] is None else ("failed" if t["worst_wrong"] == math.inf else f"{t['worst_wrong']:.3%}")
+        print(f"    {t['trace']:<24} {t['matches']:>7}  {t['wrong']:>5} {gap:>13}  {t['ambiguous']:>9}  "
+              f"{t['skipped_cpu_hours']:>8} of {t['simulated_cpu_hours']:<7}  {net:>8} of {t['held_cpu_hours']}")
+    print("  (largest gap: the biggest per-trace cycle difference between a wrongly matched candidate and the behavior it matched)")
+    d = r["detail"]
+    if not d:
+        print("  every trace has wrong matches; no screen is safe on this campaign's records")
+        return
+    print(f"  {d['trace']}: {d['matches']} of {d['candidates']} new candidates matched an earlier generation's "
+          f"behavior; {d['wrong']} wrong; {d['ambiguous']} not screened (ambiguous); {d['behaviors_indexed']} "
+          f"behaviors indexed, {d['ambiguous_keys']} ambiguous keys")
+    print(f"    simulation: {d['skipped_cpu_hours']} of {d['simulated_cpu_hours']} CPU-hours skipped, "
+          f"{d['stopped_cpu_hours']} spent on runs stopped early")
+    print(f"    held at {d['cpus']} CPUs: {d['held_freed_cpu_hours']} CPU-hours freed by matches, "
+          f"{d['held_added_cpu_hours']} added by starting the screening trace first, of {d['held_cpu_hours']}")
+    for w in d["wrong_matches"][:20]:
+        gap = "" if w["distance"] is None else f", {w['distance']:.3%} apart"
+        print(f"    wrong: g{w['generation']} {w['candidate']} ({w['why']}{gap})")
+
+
 def print_diversity(r):
     d = r["diversity"]
     print(f"campaign {r['campaign']} ({r['experiment']}, {r['traces']} traces): {d['candidates']} of "
@@ -403,8 +535,15 @@ def main():
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--thresholds", default=",".join(str(t) for t in DEFAULT_THRESHOLDS),
                         help="relative per-trace cycle differences treated as the same behavior (default 0.001,0.01)")
+    parser.add_argument("--screen", nargs="?", const="", metavar="TRACE",
+                        help="replay the duplicate screen instead, detailed for TRACE")
+    parser.add_argument("--cpus", type=int, help="with --screen: CPUs per candidate (default: the campaign's)")
     args = parser.parse_args()
     try:
+        if args.screen is not None:
+            r = screen_replay(cp.Campaign(args.campaign), args.screen or None, args.cpus)
+            print(json.dumps(r, indent=1)) if args.json else print_screen(r)
+            return 0
         thresholds = tuple(float(t) for t in args.thresholds.split(",") if t)
         r = diversity(cp.Campaign(args.campaign), thresholds)
     except (cp.CampaignError, runspec.SpecError, ec.InfraError, ValueError) as e:

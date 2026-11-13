@@ -184,6 +184,7 @@ AFAR_LLM_FAKE=1 AFAR_CXX=<Spack g++ 12> SLURM_JOB_ID=12345 SLURM_SUBMIT_DIR=$PWD
 | Search settings | Copy `configs/search/champsim-rewrite-v1.yaml` and edit it |
 | An evaluator policy | Write a `Policy` subclass with its two flags, `time_limit_s` and `preflight`, and add it to `REGISTRY`. `make evaluate-selftest` then runs the contract cases on it: seed → `completed` 1.0; forbidden call and edits outside the block → `invalid_candidate`; syntax error → `compile_failed` |
 | A run | Write `configs/runs/<name>.yaml` naming the parts, then run `make oe-check SPEC=<name>` |
+| A lever (an optimization or a research change) | Decide from its effect on results whether it needs a run-spec switch: none if it's result-identical by construction; a field, off by default, if it's result-identical only when an assumption holds; always a field or part if it changes results (`docs/levers/README.md`). Record what you learn in `docs/levers/<stage>/<lever>.md` |
 
 ## 6. Background
 
