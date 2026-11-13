@@ -109,13 +109,14 @@ def module_sha256(name):
     return h.hexdigest()
 
 
-def run(binary, trace, warmup, sim, json_out, log_path, timeout, cwd, limits=None, env=None):
-    """Run ChampSim on one trace, optionally under prlimit (limits: as_bytes, fsize_bytes, cpu_s)."""
+def run(binary, trace, warmup, sim, json_out, log_path, timeout, cwd, limits=None, env=None, cancel=None):
+    """Run ChampSim on one trace, optionally under prlimit (limits: as_bytes, fsize_bytes, cpu_s).
+    cancel (a threading.Event) stops it early, as run_killable does."""
     cmd = [str(binary), "--warmup-instructions", str(warmup), "--simulation-instructions", str(sim),
            "--json", str(json_out), str(trace)]
     if limits and shutil.which("prlimit"):
         cmd = ["prlimit", f"--as={limits['as_bytes']}", f"--fsize={limits['fsize_bytes']}",
                f"--cpu={limits['cpu_s']}", "--"] + cmd
     with open(log_path, "w") as log:
-        code, _, seconds = run_killable(cmd, cwd, timeout, stdout=log, env=env)
+        code, _, seconds = run_killable(cmd, cwd, timeout, stdout=log, env=env, cancel=cancel)
     return StepResult(ok=code == 0, seconds=seconds, exit_code=code, log=Path(log_path).read_text(errors="replace"))

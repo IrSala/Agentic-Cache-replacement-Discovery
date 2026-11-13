@@ -32,7 +32,7 @@ Run specs (`configs/runs/*.yaml`, `docs/run-specs.md`) make a campaign's parts s
 | Lever | Stage | Status | Switch | Class |
 |---|---|---|---|---|
 | [Longest-first trace order](evaluation/trace-order.md) | evaluation | default since 2026-10-29 | none | result-identical by construction |
-| [Duplicate screen](evaluation/duplicate-screen.md) | evaluation | replayed on the pilot; being built | `evaluator.duplicate_screen` (planned), off by default | result-identical if its trace separates behaviors |
+| [Duplicate screen](evaluation/duplicate-screen.md) | evaluation | built and tested locally; not yet run on HPC3 | `evaluator.duplicate_screen`, off by default | result-identical if its trace separates behaviors |
 
 **Not yet moved here:**
 - the OpenEvolve 0.4.0 findings in the team deck (generation and selection)

@@ -19,7 +19,9 @@ share a directory don't overwrite each other's.
 
 Exit status: 0 for any candidate outcome (a candidate failure is a result),
 1 for an infrastructure failure (contract §5). An evaluation already done for
-the same candidate, manifest and policy is reused unless --force.
+the same candidate, manifest and policy is reused unless --force; one that
+reused another behavior's scores through a duplicate screen is reused only by
+its own campaign (evaluator/screen.py).
 """
 
 import argparse
@@ -28,10 +30,12 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 from pathlib import Path
 
 from evaluator import champsim_build as cb
-from evaluator import results
+from evaluator import proc, results
+from evaluator import screen as screen_mod
 from evaluator.manifest import Manifest
 from evaluator.policies import REGISTRY, Candidate, Context, InfraError, get_policy, policy_class
 from evaluator.policies.compile_only import SEED
@@ -82,10 +86,13 @@ def load_baselines(manifest, baseline_dir):
 
 def evaluate(manifest, candidate, *, out_dir, baseline_dir=None, baseline=False, unscored=False, trace=None,
              policy="champsim_ipc", campaign_id="manual", generation=0, cxx="g++", jobs=1, keep=False, force=False,
-             seed=None):
+             seed=None, screen=None):
     """Evaluate and return the summary dict (also written to out_dir/summary.json,
-    or summary-<trace>.json for one trace)."""
+    or summary-<trace>.json for one trace). screen: a duplicate screen for policies that support
+    one, {trace, index, audit, evaluations} (evaluator/screen.py)."""
     out_dir = Path(out_dir)
+    if screen and (trace is not None or baseline or unscored or not policy_class(policy).supports_screen):
+        raise ValueError(f"a duplicate screen needs a scored, full evaluation by a policy that supports it, not {policy}")
     if trace is not None:
         manifest = manifest.restricted(trace)
     summary_path = out_dir / (f"summary-{trace}.json" if trace is not None else "summary.json")
@@ -94,7 +101,8 @@ def evaluate(manifest, candidate, *, out_dir, baseline_dir=None, baseline=False,
         old = json.loads(summary_path.read_text())
         if (old.get("experiment_sha256") == manifest.sha256 and old.get("candidate_sha256") == candidate.sha256
                 and old.get("policy") == policy and old.get("seed_sha256", seed_sha) == seed_sha
-                and old.get("status") != "infra_error"):
+                and old.get("status") != "infra_error"
+                and (not screened(old) or old.get("campaign_id") == campaign_id)):
             old["cached"] = True
             return old
 
@@ -108,7 +116,7 @@ def evaluate(manifest, candidate, *, out_dir, baseline_dir=None, baseline=False,
     workspace = Path(tempfile.mkdtemp(prefix=f"afar-eval-{candidate.candidate_id.replace(':', '-')}-",
                                       dir=os.environ.get("TMPDIR")))
     ctx = Context(manifest=manifest, out_dir=out_dir, workspace=workspace, cxx=cxx, jobs=jobs,
-                  campaign_id=campaign_id, generation=generation, baselines=baselines, seed=seed)
+                  campaign_id=campaign_id, generation=generation, baselines=baselines, seed=seed, screen=screen)
     started = results.now()
     try:
         outcome = get_policy(policy).evaluate(candidate, ctx)
@@ -127,8 +135,16 @@ def evaluate(manifest, candidate, *, out_dir, baseline_dir=None, baseline=False,
         "build": outcome.artifacts.get("build", {}), "artifacts": outcome.artifacts,
         "started_at": started, "finished_at": results.now(),
     }
+    if outcome.artifacts.get("screen"):
+        summary["screen"] = outcome.artifacts["screen"]
     results.write_atomic(summary_path, summary)
     return summary
+
+
+def screened(summary):
+    """Whether a summary reused another behavior's scores through a duplicate screen."""
+    s = summary.get("screen") or {}
+    return bool(s.get("matched")) and not s.get("audited") and not s.get("conflict")
 
 
 def describe(summary):
@@ -138,6 +154,14 @@ def describe(summary):
     if build.get("build_seconds") is not None:
         parts.append(f"build {build['build_seconds']}s ({build.get('tree', '')}, recompiled {len(build.get('recompiled', []))})")
     parts.append("cycles " + ", ".join(f"{t}={c}" for t, c in summary["cycles"].items()))
+    s = summary.get("screen")
+    if s:
+        if screened(summary):
+            parts.append(f"screened on {s['trace']}: the scores of {s['matched']} (generation {s['matched_generation']})")
+        elif s.get("conflict"):
+            parts.append(f"screen matched {s['matched']} on {s['trace']} but {s['conflict']} differed: evaluated in full")
+        elif s.get("audited") and s.get("matched"):
+            parts.append(f"screen audit: matched {s['matched']} on {s['trace']}, evaluated in full")
     if summary.get("reason"):
         parts.append("reason: " + summary["reason"].splitlines()[0][:160])
     return "; ".join(parts) + ("  [cached]" if summary.get("cached") else "")
@@ -214,8 +238,67 @@ def selftest(cxx, jobs):
                 ok = s["status"] == want and (s["fitness"] == 1.0 if name == "seed" else s["fitness"] == 0.0)
                 failures += not ok
                 print(f"  {'ok  ' if ok else 'FAIL'}  {f'{policy}: {name}':<38} {s['status']}, fitness {s['fitness']}")
+
+        failures += screen_selftest(tmp, seed, body, common)
     print("evaluate selftest passed" if failures == 0 else f"evaluate selftest FAILED: {failures} case(s)")
     return 1 if failures else 0
+
+
+def screen_selftest(tmp, seed, body, common):
+    """The duplicate screen (evaluator/screen.py) on three tiny traces. At 10K instructions no LLC set
+    fills, so every policy behaves as LRU does, and a comment-only variant of the seed matches it."""
+    data = json.loads((ROOT / "configs" / "experiments" / "crc2-tiny-v1.json").read_text())
+    data.update(experiment_id="selftest-screen")
+    data["traces"] = [t for t in data["traces"] if t["id"] in ("bzip2_183B", "mcf_46B", "astar_163B")]
+    path = tmp / "selftest-screen.json"
+    path.write_text(json.dumps(data, indent=2))
+    manifest = Manifest(path)
+    ids = [t["id"] for t in manifest["traces"]]
+    base_dir, evals = tmp / "screen-baselines", tmp / "screen-evals"
+    evaluate(manifest, baseline_candidate(manifest), out_dir=base_dir, baseline=True, **common)
+    first = candidate_from_text(seed)
+    s0 = evaluate(manifest, first, out_dir=evals / first.candidate_id, baseline_dir=base_dir,
+                  campaign_id="selftest", generation=0, **common)
+    key = screen_mod.key(json.loads((evals / first.candidate_id / "bzip2_183B.json").read_text()))
+    entry = {"candidate": first.candidate_id, "generation": 0, "cycles": [s0["cycles"][t] for t in ids]}
+    variant = candidate_from_text(seed.replace(body, "    // a comment-only change\n" + body))
+
+    def run(case, index, audit=False, campaign="selftest", screen=True):
+        scr = {"trace": "bzip2_183B", "index": index, "audit": audit, "evaluations": str(evals)} if screen else None
+        return evaluate(manifest, variant, out_dir=tmp / "screen-cases" / case, baseline_dir=base_dir,
+                        campaign_id=campaign, generation=1, screen=scr, **common)
+
+    failures = 0
+
+    def check(name, ok, s):
+        nonlocal failures
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'}  {name:<38} {describe(s)[:150]}")
+
+    m = run("match", {key: entry})
+    check("screen: a match reuses its scores", screened(m) and m["fitness"] == s0["fitness"]
+          and m["speedups"] == s0["speedups"] and "bzip2_183B" in m["traces"] and m["screen"]["matched"] == first.candidate_id
+          and (tmp / "screen-cases" / "match" / "bzip2_183B.json").exists(), m)
+    n = run("no-match", {"0:0:x:y": entry})
+    check("screen: no match runs every trace", not screened(n) and sorted(n["traces"]) == sorted(ids)
+          and n["screen"]["matched"] is None and n["fitness"] == s0["fitness"], n)
+    a = run("ambiguous", {key: screen_mod.AMBIGUOUS})
+    check("screen: an ambiguous key isn't screened", not screened(a) and sorted(a["traces"]) == sorted(ids), a)
+    au = run("audit", {key: entry}, audit=True)
+    check("screen: an audit runs every trace", not screened(au) and au["screen"]["audited"]
+          and au["screen"]["matched"] == first.candidate_id and sorted(au["traces"]) == sorted(ids), au)
+    again = run("match", {key: entry})
+    other = run("match", {}, campaign="another", screen=False)
+    check("screen: reused only by its own campaign", again.get("cached") and not other.get("cached")
+          and not screened(other) and sorted(other["traces"]) == sorted(ids), other)
+
+    stop = threading.Event()
+    threading.Timer(0.3, stop.set).start()
+    code, _, seconds = proc.run_killable(["sleep", "30"], tmp, 60, cancel=stop)
+    ok = code is None and seconds < 5
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'}  {'screen: a cancel stops a running trace':<38} exit {code} after {seconds:.1f}s")
+    return failures
 
 
 def main():

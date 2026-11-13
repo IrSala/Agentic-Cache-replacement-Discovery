@@ -56,6 +56,7 @@ from controller import campaign as cp  # noqa: E402
 from controller import runspec  # noqa: E402
 from controller.report import makespan, trace_records  # noqa: E402
 from evaluator import evaluate_candidate as ec  # noqa: E402
+from evaluator import screen as screen_mod  # noqa: E402
 from evaluator.policies.champsim_ipc import run_order  # noqa: E402
 
 DEFAULT_THRESHOLDS = (0.001, 0.01)
@@ -70,16 +71,16 @@ COPY = "identical to the parent program"
 
 def llc_misses(rec):
     """Every LLC miss in the measured region, from the run's ChampSim JSON (None if it's gone)."""
-    path = (rec.get("logs") or {}).get("champsim_json")
-    try:
-        llc = json.loads(Path(path).read_text())[0]["roi"]["LLC"]
-    except (OSError, TypeError, ValueError, KeyError, IndexError):
-        return None
-    return sum(sum(v["miss"]) for v in llc.values() if isinstance(v, dict) and "miss" in v)
+    return screen_mod.llc_misses((rec.get("logs") or {}).get("champsim_json"))
 
 
 def fingerprint(evals, cand, traces):
-    """{cycles, misses, run_s} per trace in manifest order, or None unless every trace completed."""
+    """{cycles, misses, run_s} per trace in manifest order, or None unless every trace completed.
+    A candidate the duplicate screen matched to a behavior is that behavior (its "screened_from")."""
+    summary = cp.read_json(evals / cand / "summary.json", {}) or {}
+    if ec.screened(summary):
+        fp = fingerprint(evals, summary["screen"]["matched"], traces)
+        return fp and {**fp, "screened_from": summary["screen"]["matched"]}
     recs = trace_records(evals, cand)
     if any(recs.get(t, {}).get("status") != "completed" or recs[t].get("cycles") is None for t in traces):
         return None
@@ -365,9 +366,6 @@ def diversity(c, thresholds=DEFAULT_THRESHOLDS):
 
 # --- the duplicate screen, replayed ---------------------------------------------
 
-AMBIGUOUS = "ambiguous"
-
-
 def screen_rows(generations, traces, order, screen, cpus):
     """The duplicate screen replayed on recorded results.
 
@@ -394,11 +392,12 @@ def screen_rows(generations, traces, order, screen, cpus):
             s = recs.get(screen) or {}
             key = (s.get("cycles"), s.get("misses")) if s.get("status") == "completed" else None
             hit = index.get(key) if key else None
-            if hit == AMBIGUOUS:
+            if hit == screen_mod.AMBIGUOUS:
                 out["ambiguous"] += 1
                 hit = None
             if hit is not None:
                 out["matches"] += 1
+                hit = tuple(hit["cycles"])
                 if vector != hit:
                     wrong.append({"generation": g, "candidate": cand,
                                   "why": "failed on another trace" if vector is None else "differs on another trace",
@@ -411,19 +410,14 @@ def screen_rows(generations, traces, order, screen, cpus):
             else:
                 out["held_added_s"] += cpus * (makespan([times[screen]] + [times[t] for t in rest], cpus) - full)
             if vector is not None and key:
-                found.setdefault(key, set()).add(vector)
-        for key, vectors in found.items():
-            known = index.get(key)
-            if known == AMBIGUOUS or len(vectors) > 1 or (known is not None and known not in vectors):
-                index[key] = AMBIGUOUS
-            elif known is None:
-                index[key] = next(iter(vectors))
+                found.setdefault(key, {})[vector] = {"candidate": cand, "generation": g, "cycles": vector}
+        screen_mod.merge(index, found)
     hours = {k: round(v / 3600, 1) for k, v in out.items() if k.endswith("_s")}
     return {"trace": screen, "cpus": cpus, "candidates": out["candidates"], "matches": out["matches"],
             "wrong": len(wrong), "wrong_matches": wrong, "ambiguous": out["ambiguous"],
             "worst_wrong": max((w["distance"] if w["distance"] is not None else math.inf for w in wrong), default=None),
-            "behaviors_indexed": sum(v != AMBIGUOUS for v in index.values()),
-            "ambiguous_keys": sum(v == AMBIGUOUS for v in index.values()),
+            "behaviors_indexed": sum(v != screen_mod.AMBIGUOUS for v in index.values()),
+            "ambiguous_keys": sum(v == screen_mod.AMBIGUOUS for v in index.values()),
             **{k.replace("_s", "_cpu_hours"): v for k, v in hours.items()}}
 
 
@@ -445,9 +439,12 @@ def screen_replay(c, trace=None, cpus=None):
             cand = e.get("candidate_id")
             if cand and cand not in seen:
                 seen.add(cand)
+                # A candidate a screen already matched is replayed as the full evaluation it stood in for.
+                summary = cp.read_json(evals / cand / "summary.json", {}) or {}
+                source = summary["screen"]["matched"] if ec.screened(summary) else cand
                 recs = {t: {"status": r.get("status"), "cycles": r.get("cycles"), "run_s": r.get("run_seconds"),
                             "misses": llc_misses(r) if r.get("status") == "completed" else None}
-                        for t, r in trace_records(evals, cand).items()}
+                        for t, r in trace_records(evals, source).items()}
                 cands.append((cand, recs))
         generations.append((g, cands))
     per_trace = [screen_rows(generations, traces, order, t, cpus) for t in traces]

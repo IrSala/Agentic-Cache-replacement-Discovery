@@ -27,6 +27,9 @@ iterations: 10
 overrides: {}                       # optional dotted OpenEvolve keys, applied last, e.g. database.num_islands: 2
 ```
 
+**Optional evaluator settings:**
+- `duplicate_screen: {trace, audit_every}`: run one trace first and reuse a known behavior's scores when it matches. It's for campaigns using `champsim_ipc`, and off when absent (`docs/levers/evaluation/duplicate-screen.md`).
+
 **Other ways to name a part:**
 - **Raw OpenEvolve evaluators:** a spec can name one instead of a policy, with `evaluator.openevolve_file`, `timeout_s` and optional `openevolve:` settings. `toy-v1` does this for OpenEvolve's example.
 - **Profiles by path:** any profile can be named by a path (a value containing `/`) instead of a name. That's handy for an experiment that isn't ready to become a named profile.

@@ -93,7 +93,7 @@ def campaign_report(c):
     aggregated = {e["generation"]: T(e["at"]) for e in events if e["event"] == "aggregated"}
     rows, per_trace = [], {}
     held = simulated = gpu_s = 0.0
-    fresh_n = cached_n = 0
+    fresh_n = cached_n = screened_n = 0
     for g in sorted(int(p.name) for p in (c.path / "generations").glob("*") if p.name.isdigit()):
         row = {"generation": g}
         gen = generated.get(g)
@@ -107,7 +107,7 @@ def campaign_report(c):
                 if sub:
                     row["gpu_wait_min"] = minutes(T(sub["at"]), start)
         first = next((T(e["at"]) for e in submitted if e["stage"] == "evaluate" and e["generation"] == g), None)
-        ends, cached = [], 0
+        ends, cached, screened = [], 0, 0
         for f in sorted((c.gen_dir(g) / "results").glob("*.json")):
             if ".infra-" in f.name:
                 continue
@@ -118,7 +118,13 @@ def campaign_report(c):
                 cached += 1              # scored before, in this or another campaign: no CPU time here
                 continue
             held += cpus * (end - start).total_seconds()
-            simulated += (s.get("metrics") or {}).get("run_seconds") or 0.0
+            if ec.screened(s):
+                # Its metrics are the matched behavior's; what it ran is its own records and the runs it stopped.
+                screened += 1
+                simulated += sum(rec.get("run_seconds") or 0.0 for tid, rec in trace_records(evals, r["candidate_id"])
+                                 .items() if tid in s["traces"]) + (s["screen"].get("stopped_seconds") or 0.0)
+            else:
+                simulated += (s.get("metrics") or {}).get("run_seconds") or 0.0
             ends.append(end)
             if r["status"] == "completed":
                 for tid, rec in trace_records(evals, r["candidate_id"]).items():
@@ -126,7 +132,8 @@ def campaign_report(c):
                         per_trace.setdefault(tid, []).append(rec["run_seconds"])
         fresh_n += len(ends)
         cached_n += cached
-        row.update(evaluated=len(ends), cached=cached)
+        screened_n += screened
+        row.update(evaluated=len(ends), cached=cached, screened=screened)
         if ends and first:
             ends.sort()
             row.update(half_min=minutes(first, at_fraction(ends, 0.5)), three_quarters_min=minutes(first, at_fraction(ends, 0.75)),
@@ -146,7 +153,7 @@ def campaign_report(c):
         "candidates_per_generation": c.params["candidates_per_generation"],
         "wall_hours": round(cp.wall_hours(c, None if st["state"] == "running" else T(st["updated_at"])), 2),
         "generations": rows,
-        "evaluations": fresh_n, "cached": cached_n,
+        "evaluations": fresh_n, "cached": cached_n, "screened": screened_n,
         "cpu_hours_held": round(held / 3600, 1), "cpu_hours_simulating": round(simulated / 3600, 1),
         "efficiency": round(simulated / held, 3) if held else None,
         "cpu_hours_per_evaluation": round(held / 3600 / fresh_n, 2) if fresh_n else None,
@@ -204,7 +211,8 @@ def print_campaign(rep, sacct=None):
               f"{r['evaluated']:>9}  {r['cached']:>6} {f('half_min')} {f('three_quarters_min')} {f('last_min')} "
               f"{f('tail_min')} {f('aggregation_min', 5)}" + (f"  {r['gpu']}" if r.get("gpu") else ""))
     eff = f"{rep['efficiency']:.0%}" if rep["efficiency"] is not None else "-"
-    print(f"  evaluation tasks: {rep['evaluations']} run, {rep['cached']} cached (free); {rep['cpu_hours_held']:,} CPU-hours "
+    screened = f" ({rep['screened']} of them screened as duplicates)" if rep.get("screened") else ""
+    print(f"  evaluation tasks: {rep['evaluations']} run{screened}, {rep['cached']} cached (free); {rep['cpu_hours_held']:,} CPU-hours "
           f"held, {rep['cpu_hours_simulating']:,} simulating: efficiency {eff}; "
           f"{rep['cpu_hours_per_evaluation']} CPU-hours per evaluation")
     print(f"  generation jobs: {rep['gpu_job_hours']} GPU-hours running; median tail after half the tasks: "

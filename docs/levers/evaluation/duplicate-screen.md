@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | Stage | evaluation |
-| Status | replayed on the pilot (2026-11-13); being built |
-| Switch | `evaluator.duplicate_screen` in a run spec (planned), off by default |
+| Status | replayed on the pilot, then built and tested locally (2026-11-13); not yet run on HPC3 |
+| Switch | `evaluator.duplicate_screen` in a run spec, off by default |
 | Class | result-identical if the screening trace tells behaviors apart |
 
 ## Question
@@ -17,27 +17,32 @@ Many new candidates behave exactly like one the campaign has already measured: d
 
 The screen catches different code with the same behavior.
 
-## How it works (as designed; not built yet)
+## How it works
 
-- **The spec field.** Leaving it out keeps today's behavior.
+- **The spec field.** Leaving it out keeps today's behavior. `controller/runspec.py` checks that the trace is in the manifest, that the policy supports a screen (`champsim_ipc` does), and that the spec is a campaign.
   ```yaml
   evaluator:
     duplicate_screen:
       trace: bzip2_183B       # one of the manifest's traces
-      audit_every: 10         # every 10th match still runs all traces, as a check
+      audit_every: 10         # the default: every 10th candidate runs all traces anyway; 0 turns audits off
   ```
-- **Known behaviors:** candidates from this campaign's earlier generations that completed every trace.
+- **Known behaviors** (`generations/<g>/screen-index.json`, written at aggregation by `update_screen_index` in `controller/campaign.py`):
+  - candidates from this campaign's earlier generations that completed every trace
   - Failures are never matched, since timeouts depend on the node.
   - A generation's candidates run at the same time, so they can't match each other.
-- **The key:** the screening trace's cycles and LLC misses, plus the ChampSim commit and compiler.
-- **Order:** the screening trace starts first, together with the longest traces, so a new behavior isn't delayed.
+  - Each entry holds the behavior's cycles on every trace.
+- **The key** (`evaluator/screen.py`): the screening trace's cycles and LLC misses, plus the ChampSim commit and compiler.
+- **Order:** the screening trace starts first, together with the longest traces, so a new behavior isn't delayed (`evaluator/policies/champsim_ipc.py`).
 - **On a match:**
-  - The other traces are stopped or skipped.
-  - The candidate gets the matched behavior's scores.
-  - Its summary records `screen: {trace, matched, audited}`.
-  - Only the screening trace's record is on disk.
-- **Ambiguous keys:** a key two different behaviors share is never screened.
-- **Audits:** every Nth match runs every trace anyway. A mismatch is logged and marks the key ambiguous.
+  - Running traces are stopped (`run_killable`'s cancel event) and the rest are skipped.
+  - The candidate gets the matched behavior's metrics, with its own build time, so OpenEvolve sees what a full evaluation would have given.
+  - Its summary records `screen: {trace, matched, matched_generation, audited, stopped_seconds}`.
+  - On disk are the screening trace's record and any trace that finished before the match. Stopped runs leave nothing.
+- **Conflicts:** if a trace that finished before the match failed or disagrees with the matched behavior's cycles, the match was wrong. The stopped and skipped traces then run, the candidate is scored in full, and its summary records `conflict`.
+- **Ambiguous keys:** a key two different behaviors share is never screened. A false match makes its key ambiguous.
+- **Audits:** a candidate whose id is a multiple of `audit_every` runs every trace even when it matches. At aggregation, an audit or conflict that differs from its matched behavior is a false match: it's listed in the index and logged once as a `screen_false_match` event.
+- **Reuse:** a screened summary is reused only by its own campaign. Another campaign evaluating the same code runs it again.
+- **Reports:** `campaign-diversity` counts a screened candidate as the behavior it matched. `campaign-report` counts screened candidates and charges them only what they ran. The generation's `summary.json` counts screened candidates, audits, conflicts, ambiguous keys and false matches.
 
 ## Evidence
 
@@ -74,6 +79,17 @@ The largest gap is the biggest per-trace cycle difference between a wrongly matc
 - **Some behaviors differ on only one trace.** One pair differs only on bzip2, by 0.002% of its cycles; another differs only on bzip2 and soplex. So every screen of one or two traces without bzip2 makes at least one wrong match.
 - **How far off a wrong match is depends on the trace.** Seven traces go wrong only between near-identical behaviors, at most 0.053% apart. Four go wrong by up to 0.38%, and milc and libquantum by up to 11%. So the trace should be chosen from a replay, not by guess.
 
+### 2026-11-13: built and tested locally
+
+- **`make evaluate-selftest`,** on three tiny traces, where every policy behaves as LRU does:
+  - a match reuses the matched scores
+  - no match, or an ambiguous key, runs every trace
+  - an audit runs every trace
+  - a screened summary isn't reused by another campaign
+  - a cancel stops a running ChampSim within a second
+- **`make campaign-selftest`:** the self-test campaign with the screen on, against the same campaign with it off. Every candidate in both got identical fitness and speedups, and 2 were screened. A result altered into a disagreeing audit was caught as one false match, and its key became ambiguous.
+- **`make oe-check`:** `crc2-evolve-c1` and `crc2-evolve-c2` resolve with unchanged evaluator records.
+
 ### 2026-11-13: the false-merge check (HPC3 job 113482)
 
 Two members of each of the pilot's three largest behaviors kept identical cycles and LLC misses at 3.6× the evolution length (`docs/campaigns.md` §9). Identical results on the campaign's traces are a stable basis for matching.
@@ -95,9 +111,7 @@ Two members of each of the pilot's three largest behaviors kept identical cycles
 ## Decision and next step
 
 - **Class:** result-identical if the screening trace separates behaviors. So it gets a run-spec switch, off by default (`../README.md`).
-- **Next:**
-  - build it behind `evaluator.duplicate_screen` and test it locally (a self-test campaign with the screen off and on must give every candidate the same scores)
-  - then decide which campaign uses it first. The proposal is `crc2-evolve-c2`'s 2-generation acceptance run, through its own spec.
+- **Next:** decide which campaign uses it first. The proposal is `crc2-evolve-c2`'s 2-generation acceptance run, through its own spec, then `make campaign-screen` on its records.
 - **Open questions:**
   - Should it screen on two strong separators (bzip2 plus omnetpp or soplex) for margin? The screen would then take as long as the slower of the two.
   - Should the trace be re-chosen from each campaign's replay?

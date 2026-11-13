@@ -61,6 +61,7 @@ from controller import runspec  # noqa: E402
 from controller.executor import ExecutorError, LocalExecutor, SlurmExecutor  # noqa: E402
 from evaluator import evaluate_candidate as ec  # noqa: E402
 from evaluator import results  # noqa: E402
+from evaluator import screen as screen_mod  # noqa: E402
 from evaluator.manifest import Manifest  # noqa: E402
 from evaluator.policies import InfraError, policy_class  # noqa: E402
 
@@ -401,12 +402,19 @@ def evaluate_task(c, g, index):
     manifest = c.manifest()
     root = ec.results_root()
     candidate = ec.candidate_from_text((gd / "candidates" / f"{cand}.h").read_text())
+    evals = root / "evaluations" / manifest.experiment_id / ev["policy"]
+    screen = None
+    if ev.get("duplicate_screen"):
+        ds = ev["duplicate_screen"]
+        known = read_json(c.gen_dir(g - 1) / SCREEN_INDEX, {}) if g > 0 else {}
+        screen = {"trace": ds["trace"], "index": known.get("behaviors", {}), "evaluations": str(evals),
+                  "audit": ds["audit_every"] > 0 and int(cand, 16) % ds["audit_every"] == 0}
     try:
         summary = ec.evaluate(
-            manifest, candidate, out_dir=root / "evaluations" / manifest.experiment_id / ev["policy"] / cand,
+            manifest, candidate, out_dir=evals / cand,
             baseline_dir=root / "baselines" / manifest.experiment_id, policy=ev["policy"], campaign_id=c.id,
             generation=g, cxx=os.environ.get("AFAR_CXX", "g++"), jobs=ev["cpus_per_candidate"],
-            seed=ROOT / c.meta["seed"]["path"])
+            seed=ROOT / c.meta["seed"]["path"], screen=screen)
     except InfraError as e:
         return infra(str(e))
     if summary["status"] == "infra_error":
@@ -480,6 +488,8 @@ def aggregate(c, g, job=None):
         if g in c.faults().get("aggregate_crash_after_save", []):
             raise CampaignError("injected by faults.json: aggregate crashed after saving")
         c.event("aggregated", generation=g, programs_added=added)
+    if c.meta["evaluator"].get("duplicate_screen"):
+        update_screen_index(c, g)
     summary = summarize(c, g)
     results.write_atomic(gd / "summary.json", summary)
 
@@ -560,6 +570,55 @@ def limit_reached(c, g, summary):
     return None
 
 
+SCREEN_INDEX = "screen-index.json"
+
+
+def update_screen_index(c, g):
+    """The duplicate screen's behaviors after generation g (generations/<g>/screen-index.json): g-1's index
+    plus g's fully evaluated behaviors (evaluator/screen.py). Generation g+1's tasks read it. A full evaluation
+    that matched a known behavior (an audit, or a conflict found while screening) and differs from it is a
+    false match: it's logged once, and its key becomes ambiguous through the merge."""
+    path = c.gen_dir(g) / SCREEN_INDEX
+    rerun = path.exists()
+    ds = c.meta["evaluator"]["duplicate_screen"]
+    manifest = c.manifest()
+    traces = [t["id"] for t in manifest["traces"]]
+    evals = ec.results_root() / "evaluations" / manifest.experiment_id / c.meta["evaluator"]["policy"]
+    index = dict(read_json(c.gen_dir(g - 1) / SCREEN_INDEX, {}).get("behaviors", {})) if g > 0 else {}
+    found, false, counts = {}, [], {"screened": 0, "audited": 0, "conflicts": 0}
+    gd = c.gen_dir(g)
+    for cand in dict.fromkeys(read_json(gd / "tasks.json", [])):
+        s = (read_json(gd / "results" / f"{cand}.json", {}) or {}).get("summary")
+        if not s or s.get("cached"):
+            continue                    # a cached result was counted when it was evaluated
+        info = s.get("screen") or {}
+        if ec.screened(s):
+            counts["screened"] += 1
+            continue
+        counts["audited"] += bool(info.get("audited"))
+        counts["conflicts"] += bool(info.get("conflict"))
+        cycles = s.get("cycles") or {}
+        if info.get("matched"):
+            want = (read_json(evals / info["matched"] / "summary.json", {}) or {}).get("cycles") or {}
+            if s["status"] != "completed" or any(cycles.get(t) != want.get(t) for t in traces):
+                false.append({"candidate": cand, "matched": info["matched"], "status": s["status"],
+                              "traces": [t for t in traces if cycles.get(t) != want.get(t)]})
+        if s["status"] != "completed":
+            continue
+        k = screen_mod.key(read_json(evals / cand / f"{ds['trace']}.json", {}) or {})
+        if k:
+            vector = tuple(cycles[t] for t in traces)
+            found.setdefault(k, {})[vector] = {"candidate": cand, "generation": g, "cycles": list(vector)}
+    screen_mod.merge(index, found)
+    results.write_atomic(path, {"trace": ds["trace"], "generation": g, "behaviors": index,
+                                "ambiguous": sum(v == screen_mod.AMBIGUOUS for v in index.values()),
+                                **counts, "false_matches": false})
+    if not rerun:
+        for f in false:
+            c.event("screen_false_match", generation=g, trace=ds["trace"], **f)
+    return index
+
+
 def summarize(c, g):
     gd = c.gen_dir(g)
     entries = read_json(gd / "generation.json")["entries"]
@@ -573,10 +632,16 @@ def summarize(c, g):
             key = "rejected: " + e["rejected"].split(" (")[0]
             statuses[key] = statuses.get(key, 0) + 1
     best = read_json(c.checkpoint(g) / "best_program_info.json", {})
-    return {"generation": g, "iterations": [entries[0]["iteration"], entries[-1]["iteration"]],
-            "statuses": statuses, "best_of_generation": max(fitness, default=None),
-            "best_overall": best.get("metrics", {}).get("combined_score"), "best_id": best.get("id"),
-            "unique_candidates": len(read_json(gd / "tasks.json")), "at": now()}
+    out = {"generation": g, "iterations": [entries[0]["iteration"], entries[-1]["iteration"]],
+           "statuses": statuses, "best_of_generation": max(fitness, default=None),
+           "best_overall": best.get("metrics", {}).get("combined_score"), "best_id": best.get("id"),
+           "unique_candidates": len(read_json(gd / "tasks.json")), "at": now()}
+    idx = read_json(gd / SCREEN_INDEX, None)
+    if idx:
+        out["screen"] = {k: idx[k] for k in ("screened", "audited", "conflicts", "ambiguous")}
+        out["screen"].update(false_matches=len(idx["false_matches"]),
+                             behaviors=sum(v != screen_mod.AMBIGUOUS for v in idx["behaviors"].values()))
+    return out
 
 
 def run_stage(stage, campaign, g, index, job=None, env=None):
@@ -1032,6 +1097,71 @@ def selftest(keep=False):
               len(rep["per_trace"]) == len(c.manifest()["traces"])
               and all(t["matches"] <= t["candidates"] for t in rep["per_trace"]),
               f"{len(rep['per_trace'])} traces, detail {(rep['detail'] or {}).get('trace')}")
+
+        # (screen) the same campaign with the duplicate screen on, its evaluations fresh so nothing is reused
+        # from campaign a. At 10K instructions every policy behaves as LRU does, so the MRU variant matches
+        # the seed's behavior. Every candidate must get the scores campaign a gave it, and some are screened.
+        evals_root = tmp / "results" / "evaluations" / manifest.experiment_id
+        aside = evals_root.with_name(manifest.experiment_id + ".screen-off")
+        evals_root.rename(aside)
+        try:
+            data = json.loads(json.dumps(spec))
+            data["evaluator"]["duplicate_screen"] = {"trace": "bzip2_183B", "audit_every": 0}
+            (tmp / "campaign-screen.yaml").write_text(yaml.safe_dump(data))
+            cs = start(tmp / "campaign-screen.yaml", name="selftest-screen", executor="local")
+            drain_local(cs)
+
+            def outcomes(camp):
+                found = {}
+                for g in range(4):
+                    for f in (camp.gen_dir(g) / "results").glob("*.json"):
+                        if ".infra-" not in f.name:
+                            r = read_json(f)
+                            found[r["candidate_id"]] = r["summary"]
+                return found
+            on, off = outcomes(cs), outcomes(c)
+            common = sorted(set(on) & set(off))
+            screened = [k for k, v in on.items() if ec.screened(v)]
+            check("(screen) a screened campaign finishes with every score unchanged", cs.status["state"] == "finished"
+                  and common and all(on[k]["fitness"] == off[k]["fitness"] and on[k]["speedups"] == off[k]["speedups"]
+                                     for k in common) and screened,
+                  f"{len(common)} candidates in both, {len(screened)} screened")
+            idx = read_json(cs.gen_dir(3) / SCREEN_INDEX, {})
+            evals_on = tmp / "results" / "evaluations" / manifest.experiment_id / cs.meta["evaluator"]["policy"]
+            ids = [t["id"] for t in manifest["traces"]]
+            fp = dv.fingerprint(evals_on, screened[0], ids) if screened else None
+            report_on = report.campaign_report(cs)
+            check("(screen) the index, the generation summaries, diversity and the report know it",
+                  idx.get("trace") == "bzip2_183B" and idx.get("behaviors") and not idx.get("false_matches")
+                  and sum(read_json(cs.gen_dir(g) / "summary.json")["screen"]["screened"] for g in range(4)) == len(screened)
+                  and fp is not None and fp.get("screened_from") and report_on["screened"] == len(screened),
+                  f"{len(idx.get('behaviors', {}))} key(s), report {report_on['screened']} screened")
+
+            # A full evaluation that matched a behavior and differs from it is a false match: logged once,
+            # and its key becomes ambiguous. Made here by turning a screened result into an audit that disagrees.
+            where = [(g, k) for g in range(1, 4) for k in read_json(cs.gen_dir(g) / "tasks.json", [])
+                     if k in screened and not (read_json(cs.gen_dir(g) / "results" / f"{k}.json", {}) or {})
+                     .get("summary", {}).get("cached")]
+            if not where:
+                check("(screen) a false match is caught", False, "no screened candidate to alter")
+            else:
+                g, cand = where[0]
+                rpath = cs.gen_dir(g) / "results" / f"{cand}.json"
+                r = read_json(rpath)
+                want = read_json(evals_on / r["summary"]["screen"]["matched"] / "summary.json")["cycles"]
+                r["summary"]["screen"] = {**r["summary"]["screen"], "audited": True}
+                r["summary"]["cycles"] = {**want, ids[-1]: want[ids[-1]] + 1}
+                results.write_atomic(rpath, r)
+                (cs.gen_dir(g) / SCREEN_INDEX).unlink()
+                update_screen_index(cs, g)
+                again = read_json(cs.gen_dir(g) / SCREEN_INDEX)
+                logged = [e for e in read_events(cs) if e["event"] == "screen_false_match"]
+                check("(screen) a false match is caught", len(again["false_matches"]) == 1 and again["ambiguous"] == 1
+                      and len(logged) == 1 and logged[0]["candidate"] == cand and logged[0]["traces"] == [ids[-1]],
+                      f"{len(again['false_matches'])} false match, {again['ambiguous']} ambiguous key(s)")
+        finally:
+            shutil.rmtree(evals_root, ignore_errors=True)
+            aside.rename(evals_root)
 
         # (c) a persistent failure halts with a clear status.
         c2 = start(spec_path, name="selftest-c", executor="local")

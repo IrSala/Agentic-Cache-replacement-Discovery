@@ -103,7 +103,7 @@ Each campaign lives in `$AFAR_RESULTS/campaigns/<id>/`, on `/data`, because `/ho
 | `budget.json` | CPU- and GPU-hours used so far, from `sacct`, updated each generation (M6) |
 | `resolved/` | the OpenEvolve config and the prompt snapshot |
 | `checkpoints/checkpoint_<iteration>/` | standard OpenEvolve checkpoints, one per generation. `openevolve-run --checkpoint` continues from them, so a campaign can be finished in single-job mode |
-| `generations/<g>/` | `candidates/<id>.h`; `generation.json` (parent, islands, prompt, reply, tokens or the rejection, per iteration); `tasks.json`; `results/<id>.json` and `<id>.infra-<attempt>.json`; `attempts.json`; `summary.json` |
+| `generations/<g>/` | `candidates/<id>.h`; `generation.json` (parent, islands, prompt, reply, tokens or the rejection, per iteration); `tasks.json`; `results/<id>.json` and `<id>.infra-<attempt>.json`; `attempts.json`; `summary.json`; with a duplicate screen, `screen-index.json` (the behaviors generation g+1 is screened against) |
 | `logs/` | every stage job's Slurm output |
 
 ## 4. Failures
@@ -413,6 +413,7 @@ A checkpoint can hold fewer programs than were added. When a program takes over 
 
 **The duplicate screen** builds on this: run one trace first, and skip the other 13 when its result matches a behavior the campaign has already measured.
 - **On the pilot:** `make campaign-screen C=crc2-evolve-c1 CPUS=8` replays it from the records. Screening on bzip2, 83 of 162 new candidates match an earlier generation's behavior with no wrong match, skipping 61% of the simulation. bzip2 is the only trace without a wrong match.
+- **Built (2026-11-13), off by default:** a run spec turns it on with `evaluator.duplicate_screen`. It's tested locally, not yet run on HPC3.
 - **Still to run:** the same replay on `crc2-evolve-c2`'s records.
 - The design, the evidence and the decisions are in `docs/levers/evaluation/duplicate-screen.md`.
 
