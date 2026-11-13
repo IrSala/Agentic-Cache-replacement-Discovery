@@ -962,6 +962,32 @@ def selftest(keep=False):
         s = read_json(c.gen_dir(3) / "summary.json")
         check("statuses vary across candidates", len(s["statuses"]) >= 2, str(s["statuses"]))
 
+        # (efficiency) traces run longest first, by their baseline's run time, and the outcome doesn't
+        # depend on it; the cost report and estimator (controller/report.py) read this campaign and spec.
+        from controller import report
+        from evaluator.policies.champsim_ipc import run_order
+        ts = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+        by_time = {"a": {"run_seconds": 1.0}, "b": {"run_seconds": 3.0}, "c": {"run_seconds": 2.0}}
+        check("(efficiency) run_order: longest baseline first, else the manifest's",
+              [t["id"] for t in run_order(ts, by_time)] == ["b", "c", "a"] and [t["id"] for t in run_order(ts, None)] == ["a", "b", "c"])
+        mru = ec.candidate_from_text(replies["2-mru"])
+        runs = [ec.evaluate(manifest, mru, out_dir=tmp / f"jobs-{j}", baseline_dir=tmp / "results" / "baselines" / manifest.experiment_id,
+                            cxx=os.environ.get("AFAR_CXX", "g++"), jobs=j) for j in (2, 4)]
+        check("(efficiency) on 2 or 4 CPUs: identical cycles and fitness", runs[0]["status"] == "completed"
+              and runs[0]["cycles"] == runs[1]["cycles"] and runs[0]["fitness"] == runs[1]["fitness"],
+              f"{runs[0]['status']}, fitness {runs[0]['fitness']}")
+        rep = report.campaign_report(c)
+        files = sum(1 for g in range(4) for f in (c.gen_dir(g) / "results").glob("*.json") if ".infra-" not in f.name)
+        check("(efficiency) campaign-report: every generation, evaluation and trace",
+              [r["generation"] for r in rep["generations"]] == [0, 1, 2, 3] and rep["evaluations"] + rep["cached"] == files
+              and len(rep["traces"]) == len(manifest["traces"]),
+              f"{rep['evaluations']} evaluated, {rep['cached']} cached, {len(rep['traces'])} traces")
+        est = report.estimate(spec_path)
+        warned = report.estimate(variant("over-budget", max_wall_hours=1000, max_cpu_hours=1e-9))
+        check("(efficiency) campaign-estimate, and its budget warning", est["generations"] == 3
+              and est["candidate_minutes"] > 0 and not est["warnings"]
+              and any("max_cpu_hours" in w for w in warned["warnings"]), (warned["warnings"] or ["no warning"])[0][:60])
+
         # (c) a persistent failure halts with a clear status.
         c2 = start(spec_path, name="selftest-c", executor="local")
         (c2.path / "faults.json").write_text(json.dumps({"infra": [{"generation": 0, "index": 0, "attempts": "all"}]}))

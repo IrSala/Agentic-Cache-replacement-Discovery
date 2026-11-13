@@ -5,7 +5,7 @@ A campaign runs evolution as a chain of short Slurm jobs instead of one long GPU
 - **Evaluation:** a CPU array scores them on many nodes at once.
 - **Aggregation:** a small job adds the scores to OpenEvolve's database and starts the next generation.
 
-Why stage it at all? In M4's single-job runs, evaluation took about 7× the LLM's time (95.8 s against 13.2 s per iteration), so the GPU sat idle. Splitting the stages lets evaluation spread over CPU nodes, while the GPU is held only for the minutes it's needed.
+Why stage it at all? In M4's single-job runs, evaluation took about 7× the LLM's time (95.8 s against 13.2 s per iteration), so the GPU sat idle. Splitting the stages lets evaluation spread over CPU nodes, while the GPU is held only for the minutes it's needed. That trade depends on how much LLM work a generation needs: with today's 7B model answering once per candidate, it's about 1% of a generation. A larger model or LLM coding practices would raise it, and past about a quarter, keeping one GPU on would be the better design (section 8).
 
 ## 1. Starting one
 
@@ -79,7 +79,7 @@ start ──► evaluate(0) = the seed ──► aggregate(0) ──► generate
 | Stage | Job | What it does |
 |---|---|---|
 | `generate(g)` | `slurm/campaign_generate.sbatch`: 1 A100 or H100 (`--gres=gpu:1`, P100 nodes excluded), 4 CPUs, 24 GB, 30 min | Starts the model server from the spec's model profile and loads the newest checkpoint. It samples one parent per candidate, round-robin over the islands, and builds each prompt as OpenEvolve's worker does. It sends all the prompts at once, since vLLM batches them. Each reply is parsed as a full rewrite. A reply with no code, an exact copy of its parent, or code over `max_code_length` is recorded as rejected and never evaluated. Then it submits the evaluation and the aggregation |
-| `evaluate(g)` | `slurm/campaign_evaluate.sbatch`: an array, one task per unique candidate; `cpus_per_candidate` CPUs, 1 GB each (at least 2 GB); the policy's worst-case time + 10 min | `evaluate_candidate` with the spec's policy: M2's records, statuses and cache. Exits 0 for any candidate outcome and 1 for an infrastructure failure |
+| `evaluate(g)` | `slurm/campaign_evaluate.sbatch`: an array, one task per unique candidate; `cpus_per_candidate` CPUs, 1 GB each (at least 2 GB); the policy's worst-case time + 10 min | `evaluate_candidate` with the spec's policy: M2's records, statuses and cache. `champsim_ipc` runs a candidate's traces longest first, so fewer CPUs than traces can finish as soon (section 8). Exits 0 for any candidate outcome and 1 for an infrastructure failure |
 | `aggregate(g)` | `slurm/campaign_aggregate.sbatch`: 1 CPU, 4 GB, 20 min, `afterany` on the array | Retries missing evaluations, or adds every program in iteration order, as OpenEvolve's controller does. It saves the checkpoint and the generation's `summary.json`, then submits `generate(g+1)`, finishes or halts |
 
 Jobs submit the next stage themselves; compute nodes can run `sbatch`, as M0 showed. The generation job checks that with `sbatch --test-only` before starting the server. It tries up to 4 times, 10, 30 and 60 s apart, and logs each error; if every try fails, it exits 1, an ordinary failure, since a busy controller is the likelier cause than the node (`docs/status.md` issue 16). The GPU it ran on is recorded in `generation.json` and the `generated` event, so LLM times can be compared by GPU.
@@ -228,6 +228,11 @@ The fixes after the pilot (`docs/status.md` issues 14–16) added these:
 - a generation job held until the campaign is past `max_wall_hours` doesn't ask for the model when it starts; it ends the campaign as `finished (wall_time)`, and generates and submits nothing
 - the real `slurm/campaign_generate.sbatch`, with a stand-in `sbatch`: a submit check that fails twice is retried and the job goes on; one that fails 4 times exits 1, with every error in the log
 
+The efficiency work (section 8) added these:
+- `run_order` puts traces longest first by baseline run time, and keeps the manifest's order without baselines
+- a candidate evaluated on 2 CPUs and on 4 gets identical cycles and fitness
+- `campaign-report` covers every generation, evaluation and trace of a campaign; `campaign-estimate` runs on a spec and warns when `max_cpu_hours` would end it first
+
 `controller.runspec --selftest` checks the new keys, including that a heartbeat under the floor is refused.
 
 **The M6 job scripts** ran on coe-hpc1 against a throwaway campaign, with stand-ins for `sbatch`, `squeue` and `sacct`. The heartbeat submitted its successor. The handler read a failed aggregation from `sacct`, then resubmitted it, with a new handler, as attempt 2.
@@ -271,3 +276,69 @@ Job IDs and full results are in `docs/status.md`.
 - **Whole campaign:** 22 s per iteration, against 34 s in M4's single job, and the GPU was held for about 5.5 min of the 27.
 
 A checkpoint can hold fewer programs than were added. When a program takes over a MAP-Elites cell, OpenEvolve 0.4.0 deletes the program it displaced unless that one is the best overall (`_remove_program_if_orphaned`). It also caps the population at `population_size` (50 here). The same happens in `openevolve-run`.
+
+## 8. Cost and efficiency
+
+**Measuring a campaign.** `make campaign-report C=<id>` reads only the campaign's files, so it works from either cluster.
+- **Per generation:** the generation job's queue wait and run, the LLM's seconds and GPU, and when half, three quarters and all of the evaluation tasks were done, with the tail after half.
+- **For the campaign:**
+  - the CPU-hours the evaluation tasks held (CPUs × each task's evaluation time) and spent simulating (the trace records' `run_seconds`)
+  - their ratio: the efficiency that `seff` and Princeton's jobstats report, which flags jobs below 65–80%
+  - CPU-hours per evaluation, and each trace's run times
+- **Cached evaluations** (a candidate scored before) cost nothing and are counted apart.
+- **`SACCT=1`, on g17,** adds Slurm's own `TotalCPU` and peak memory for the evaluation tasks. Cores may be shared, since every partition has `OverSubscribe=FORCE:4`, and Slurm's CPU time would show it.
+
+**Estimating a spec before it runs.** `make campaign-estimate SPEC=<name>` replays a candidate's traces on `cpus_per_candidate` CPUs, in the order the evaluator runs them, using the LRU baseline's run times. It scales the result to a generation and to `max_wall_hours`, and warns when `max_cpu_hours` would halt the campaign first.
+- **On the pilot's spec, it errs high where it should.** It estimates 56 min per generation, against the pilot's median of about 2 min for the generation job plus 54 min of evaluation. It estimates 239 CPU-hours per generation, against 144–213 measured, since duplicates and the cache made real generations cheaper.
+- **Use it to set `max_cpu_hours`.** The pilot's cap of 5,000 came from an estimate of 3,000; 48 hours without the GPU wait would have needed about twice that.
+
+**Where the pilot's compute went** (`make campaign-report C=crc2-evolve-c1`):
+
+| Part | Cost | Waste |
+|---|---|---|
+| Generation jobs | 0.32 GPU-hours of running over 11 generations: vLLM starts in 95–115 s, the LLM takes 18–36 s | The 35.4-hour wait for an A100 (issue 14, fixed) |
+| Evaluation tasks: 24 × 14 CPUs | 1,399.5 CPU-hours held; 608.3 spent simulating | **Efficiency 44%.** A task holds its 14 CPUs until its slowest trace ends. mcf takes a median 2,639 s; the fastest six traces take 553–848 s |
+| The generation barrier | the next generation waits for the last task | A median of 12 min per generation after half the tasks were done (up to 67). This costs wall time, not CPU-hours |
+| Builds, aggregation, the heartbeat | about 12 s per task; seconds; about 2 CPU-min a day | negligible |
+
+**Traces run longest first (since 2026-10-29).**
+- **How:** the `champsim_ipc` policy starts a candidate's traces in order of their LRU baseline's run time, longest first (`run_order` in `evaluator/policies/champsim_ipc.py`). It returns their records in the manifest's order, so a candidate's outcome doesn't depend on the order.
+- **Why it works:** this is longest-processing-time-first (LPT) scheduling. On k CPUs, the long traces start at once and the short ones fill the gaps, so a candidate on fewer CPUs than traces can still finish when its slowest trace does.
+- **The replay:** the pilot's 125 completed candidates, each with its own measured trace times:
+
+| CPUs per candidate | CPU-hours held | Wall time vs 14 CPUs |
+|---|---|---|
+| 14 | 1,363 | — |
+| 8 | 779 (−43%) | the same for every candidate |
+| 7 | 696 | the same at the median, 1.13× at worst |
+| 1 per trace (one task each) | 580 (−57%) | the same |
+
+**`crc2-evolve-c2`** applies this:
+- 8 CPUs per candidate and 42 candidates per generation, at the pilot's footprint of about 336 CPUs
+- the same estimated cost per generation as the pilot's spec, for 1.75× the candidates
+- its search profile keeps `population_size: 50`, for comparability with the pilot. With 42 new programs per generation the population turns over faster, and a larger population is a lever to try
+
+**What comes next, and when** (decided 2026-10-29, from the measurements above):
+1. **One 1-CPU task per (candidate, trace).**
+   - **How:** an array over the pairs, longest first. Each task runs `evaluate(..., trace=)`, as `slurm/calibrate_array.sbatch` does, and aggregation scores the 14 records.
+   - **Do it** if `campaign-report` shows efficiency under 80% with 8 CPUs, or if tasks start waiting in the queue: 1-CPU tasks with 2.5-hour limits fit backfill gaps more easily.
+   - **Why an array, not packing:** these tasks run 9–75 min, vary in length and are retried one by one. That's what arrays are for; packing many tasks into one job (GNU parallel, pilot jobs) suits short tasks.
+2. **Overlapping generations.**
+   - **How:** generation g+1's job starts when about 75% of generation g is scored, and the rest join the database when they finish. This is the queue-like behavior of OpenEvolve's own parallel controller, AlphaEvolve and FunSearch, while the GPU is still held for about 2 min per generation.
+   - **Do it** if the tail is at least 20% of a generation's wall time; it was a median of about 25% in the pilot.
+   - **Watch:** asynchronous search favors candidates that evaluate faster (evaluation-time bias). Here those are mostly candidates with fewer cycles, so the bias runs with the fitness.
+3. **A GPU that stays on**, as a pilot-job service with a work queue: only if LLM work would keep it at least 25% busy, for example with a larger model, several samples per candidate or an LLM critic. Today it's about 1%, but that reflects the current model used the simplest way: Qwen2.5-Coder-7B (7.6B parameters), one reply of about 1,100 tokens per candidate, with no reasoning and no second try. A larger model (a 32B one does about 4× the work per token and needs an 80 GB H100) or LLM coding practices would raise it: a compile-and-repair loop for rewrites that don't build, best-of-n replies, reasoning before code, or a fast and a strong model together, as AlphaEvolve does. In the pilot, 40% of the 240 rewrites added nothing new (28 copies of their parent, 30 duplicates, 37 that failed to build or run). Each practice is a search lever, to be compared by results per GPU-hour; self-repair often gains less once its cost is counted. Several centers cancel jobs that leave a GPU idle for 1–2 hours (UF, Yale, Princeton).
+4. **Not planned:** cascade or multi-fidelity evaluation, which changes the fitness, so it's a research lever; and the `nsfq*` H100s, which are a policy question (`docs/sjsu-hpc-workflow.md` §2.3).
+
+**Sources:**
+- [Princeton's jobstats](https://github.com/PrincetonUniversity/jobstats/)
+- [UF's idle-GPU policy](https://docs.rc.ufl.edu/scheduler/idle_gpu_policy/)
+- [Yale's Job Defense](https://docs.ycrc.yale.edu/clusters-at-yale/job-scheduling/job_defense/)
+- [Slurm's scheduling guide (backfill)](https://slurm.schedmd.com/sched_config.html)
+- [PSI on arrays vs packed jobs](https://gitea.psi.ch/HPCE/gitea-pages/commit/ce72b9e9c2b4ebf2910c4addc02589adfb982e5a)
+- [Graham's LPT bound](https://community.wvu.edu/~krsubramani/courses/sp14/approx/auxslinotes/lpt4:3.pdf)
+- [Karns and Desell on evaluation-time bias (GECCO 2025)](https://www.se.rit.edu/~travis/papers/2025_gecco_time_bias.pdf)
+- [Parsl's overview (pilot jobs)](https://parsl.readthedocs.io/en/latest/userguide/overview.html)
+- [The Qwen2.5-Coder technical report (model sizes)](https://arxiv.org/abs/2409.12186)
+- [Chen et al., Teaching Large Language Models to Self-Debug](https://arxiv.org/abs/2304.05128)
+- [Olausson et al., Is Self-Repair a Silver Bullet for Code Generation?](https://arxiv.org/abs/2306.09896)

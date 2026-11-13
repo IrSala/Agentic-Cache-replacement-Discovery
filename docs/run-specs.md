@@ -92,6 +92,8 @@ overrides: {}                       # optional dotted OpenEvolve keys, applied l
 - `max_tokens` is less than the context window
 - `parallel_candidates × cpus_per_candidate + 2` fits the job's CPUs
 
+**Choosing `cpus_per_candidate` for a campaign.** A candidate's traces run longest first, so it can finish as soon as its slowest trace on fewer CPUs than it has traces. Use the smallest number for which `make campaign-estimate SPEC=<name>` doesn't show a longer candidate time; its efficiency figure shows what share of the CPUs the simulations use. For `crc2-evolve-v1`, that's 8 of 14 (`docs/campaigns.md` §8).
+
 **Equivalence with R6 and R7.** OpenEvolve loaded each old hand-written YAML and the resolved config of its spec, and every field was compared. They differ only where intended:
 
 | Field | Old | Resolved |

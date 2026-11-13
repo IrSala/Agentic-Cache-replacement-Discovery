@@ -33,6 +33,8 @@ C          ?=
 NAME       ?=
 EXCLUDE    ?= cs002
 NOW        ?=
+# make campaign-report: SACCT=1 adds Slurm's CPU time and memory per evaluation task (on g17 only).
+SACCT      ?=
 
 CHAMPSIM_DIR    := external/ChampSim
 BASELINE_CONFIG := configs/champsim/baseline.json
@@ -63,7 +65,7 @@ CHAMPSIM_LDFLAGS := -static-libstdc++ -static-libgcc
 .PHONY: help setup submodules python venvs vcpkg champsim check check-runtime smoke \
         env-record lock clean distclean oe-check oe-check-config oe-toy-manual oe-summary oe-compile-selftest \
         evaluator-selftest evaluate-selftest baseline-local llm-fetch traces-fetch \
-        campaign-start campaign-status campaign-stop campaign-resume campaign-selftest mail-test
+        campaign-start campaign-status campaign-stop campaign-resume campaign-report campaign-estimate campaign-selftest mail-test
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -168,6 +170,13 @@ campaign-stop: venvs ## Halt a campaign after its current stage (C=<id>; NOW=1 c
 
 campaign-resume: venvs ## Resubmit a campaign's current stage, after a halt or a cancelled job (C=<id>; on g17)
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.campaign resume $(C)
+
+campaign-report: venvs ## What a campaign's jobs did with their CPUs and GPU: per generation and per trace (C=<id>; SACCT=1 on g17)
+	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.report campaign $(C) $(if $(SACCT),--sacct)
+
+campaign-estimate: venvs ## A spec's CPU-hours and time per candidate, per generation and in all, before it runs (SPEC=<name>)
+	@[ -n "$(SPEC)" ] || { echo "usage: make campaign-estimate SPEC=crc2-evolve-c2" >&2; exit 2; }
+	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.report estimate $(SPEC)
 
 campaign-selftest: venvs ## The staged pipeline end to end on this host: fake LLM, local executor, injected faults (~2 min)
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.oe_adapter --selftest

@@ -37,6 +37,16 @@ def _tail(text, chars=SUMMARY_CHARS):
     return text if len(text) <= chars else "…" + text[-chars:]
 
 
+def run_order(traces, baselines):
+    """Traces longest first, by their LRU baseline's run time, so ctx.jobs workers pack them as
+    LPT scheduling does: a candidate on fewer CPUs than traces still takes about as long as its
+    slowest trace (8 CPUs for crc2-evolve-v1's 14; docs/campaigns.md section 8). Without baselines
+    (baseline and calibration runs), the manifest's order."""
+    if not baselines:
+        return list(traces)
+    return sorted(traces, key=lambda t: -((baselines.get(t["id"]) or {}).get("run_seconds") or 0.0))
+
+
 class ChampsimIPC(Policy):
     name = "champsim_ipc"
     needs_baselines = True
@@ -103,11 +113,16 @@ class ChampsimIPC(Policy):
         return Build(status, reason, check_seconds + made.seconds, made.log, ws / "bin" / "champsim", details)
 
     def run(self, candidate, build, ctx):
+        """Every trace, longest first; the records come back in the manifest's order, so the
+        outcome (including which failure is reported first) doesn't depend on the order run."""
         env = results.environment(build.binary, cb.BASE_CONFIG, self._config_path)
         traces = ctx.manifest["traces"]
+        ordered = run_order(traces, ctx.baselines)
         workers = max(1, min(ctx.jobs, len(traces)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            return list(pool.map(lambda t: self._run_trace(candidate, build, ctx, t, env), traces))
+            done = dict(zip((t["id"] for t in ordered),
+                            pool.map(lambda t: self._run_trace(candidate, build, ctx, t, env), ordered)))
+        return [done[t["id"]] for t in traces]
 
     def score(self, candidate, build, records, ctx):
         by_trace = {r["trace_id"]: r for r in records}

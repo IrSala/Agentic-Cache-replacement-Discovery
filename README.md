@@ -157,6 +157,7 @@ sbatch --exclude=cs002 --export=ALL,SPEC=champsim-compile-v1 slurm/openevolve.sb
 | `oe-check SPEC=…` | validate one run spec, or all of `configs/runs/`, with every part it names (the resolver's self-test first; no GPU) |
 | `campaign-start SPEC=…` | start a staged campaign (M5) from a run spec with a `campaign:` section; on g17 (`NAME=`, `EXCLUDE=`) |
 | `campaign-status C=…` / `campaign-stop C=…` / `campaign-resume C=…` | a campaign's state, generations, heartbeat and use / halt it after the current stage (`NOW=1`: cancel its jobs and halt now) / resubmit its current stage |
+| `campaign-report C=…` / `campaign-estimate SPEC=…` | what a campaign's jobs did with their CPUs and GPU, per generation and per trace (`SACCT=1` on g17 adds Slurm's view) / a spec's CPU-hours and time before it runs (`docs/campaigns.md` §8) |
 | `campaign-selftest` | the staged pipeline end to end on coe-hpc1: fake LLM, local executor, injected faults, the watchdog and stop conditions (~1.5 min) |
 | `mail-test` | on g17: test mail delivery to `$AFAR_MAIL_USER`, from a CPU node and from Slurm (M6) |
 | `oe-check-config` | load the hand-written `configs/openevolve/*.yaml` with OpenEvolve's loader; fail on unknown keys |
