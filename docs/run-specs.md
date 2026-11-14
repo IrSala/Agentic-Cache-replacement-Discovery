@@ -44,7 +44,7 @@ overrides: {}                       # optional dotted OpenEvolve keys, applied l
 
 | Part | Where | What it holds | Today |
 |---|---|---|---|
-| Model | `configs/models/<name>.env` (shell), after the shared `configs/llm/vllm.env` | The fields below this table | `qwen2.5-coder-7b-v1`; `fake-v1` (the stand-in server, no GPU) |
+| Model | `configs/models/<name>.env` (shell), after the shared `configs/llm/vllm.env` | The fields below this table | `qwen2.5-coder-7b-v1`; `qwen3.6-27b-fp8-v1` (served by `llm_ping` only so far, `docs/llm-serving.md`); `fake-v1` (the stand-in server, no GPU) |
 | Prompt | `configs/prompts/<name>/` | `prompt.yaml`: `description`, `requires` (`champsim_commit`, `module_name`) and `openevolve:` (`prompt.*` settings). Also `system_message.txt` and any OpenEvolve template overrides, named after OpenEvolve's templates (`full_rewrite_user.txt`, ...) | `champsim-rewrite-v1`, `toy-v1` |
 | Search | `configs/search/<name>.yaml` | `description`, plus `openevolve:` with top-level and `database.*` settings, such as islands, population and diff vs full rewrite | `champsim-rewrite-v1`, `toy-v1` |
 | Evaluator policy | `evaluator/policies/<module>.py`, registered in `evaluator/policies/__init__.py` | the `static_check → build → run → score` stages, plus the metadata and methods listed under the table | `compile_only`, `champsim_ipc` |

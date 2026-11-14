@@ -35,6 +35,7 @@ The vLLM image is pinned in `configs/llm/vllm.env`, and each model in a profile,
 | Asset | Pin | Location | Status |
 |---|---|---|---|
 | Model | `Qwen/Qwen2.5-Coder-7B-Instruct` @ `c03e6d358207e414f1eca0bb1891e29f1db0e242` (Apache-2.0) | `models/Qwen2.5-Coder-7B-Instruct@c03e6d35` | **Downloaded and verified** (2026-10-15). Took 2 min 11 s with `make llm-fetch LLM_PARTS=model`. All 14 files match the Hub's sizes, and the 4 safetensors match its sha256. |
+| Model (profile `qwen3.6-27b-fp8-v1`) | `Qwen/Qwen3.6-27B-FP8` @ `a56219b8202864dc6d3e565be5ff1eea01f54cb4` (Apache-2.0) | `models/Qwen3.6-27B-FP8@a56219b8` | **Downloaded and verified** (2026-11-14). Took 4 min 29 s with `make llm-fetch PROFILE=qwen3.6-27b-fp8-v1 LLM_PARTS=model`. All 80 files match the Hub's sizes, and the 67 LFS files, including the 66 safetensors (30.9 GB), match its sha256. Served on an A100 in job 114550 (Measurements). |
 | vLLM image | `vllm/vllm-openai@sha256:5f5e535216848d0c52159c8c13a0af04be5f6fe1a84e79914300610796f76d40` (v0.30.0-x86_64, CUDA 13.0.2) | `containers/vllm-openai_v0.30.0-x86_64.sif` | **Built and verified** (2026-10-16): 8,006,660,096 bytes, sha256 `40e8def6149a1d8924361f079ddf5a76b6ca8d53d518d550acc39a8e7f355584`. `import vllm` reports 0.30.0. |
 
 **Sharing one copy:** jobs only read these two paths, and the model is mounted read-only (`--bind …:/model:ro`).
@@ -104,6 +105,31 @@ The server log ends each run with an `EngineDeadError` at shutdown. That is expe
 | 8 concurrent requests | 112 completion tokens in 0.16 s | 0.20 s |
 
 All 10 requests returned `200`. Campaign generation jobs have taken an A100 or an H100 since this test (`docs/status.md`, issue 14).
+
+**Qwen3.6-27B FP8 on an A100** (2026-11-14, `slurm/llm_ping.sbatch` with `PROFILE=qwen3.6-27b-fp8-v1`, the same image and `--max-model-len 16384 --gpu-memory-utilization 0.90`):
+
+| Job | Node / GPU | Result |
+|---|---|---|
+| 114320 | `cs001`, GPU 0 | **Failed at start-up.** The weights loaded (28.02 GiB in 17.4 s). vLLM then set aside a test cache of one block per request it may run at once, before sizing the real cache. This model's blocks are 784 tokens and about 49 MiB, so the default 256 requests needed 12.25 GiB, with 10.63 GiB free: `torch.OutOfMemoryError`. The profile now sets `--max-num-seqs 32` (1.5 GiB). |
+| 114550 | `cs004`, GPU 0 | **Passed.** The preflight found no ECC errors and 39.1 of 39.5 GiB free. All 10 requests returned `200 OK`. |
+
+| | Qwen3.6-27B FP8 (114550) | Qwen2.5-Coder-7B bf16 (R5) |
+|---|---|---|
+| Start to healthy | 225 s: weights 16.5 s (22.2 s with set-up), engine init 127.5 s, of which compilation 35.0 s | 115 s |
+| Weights on the GPU | 28.02 GiB; FP8 runs weight-only through Marlin (`MarlinFP8ScaledMMLinearKernel`), since an A100 has no FP8 units | about 15 GB |
+| GPU memory in use | 34,295 MiB of 40,960 | 35,829 MiB |
+| KV cache | 4.68 GiB, 58,861 tokens: **3.59 requests at 16,384 tokens each**. Blocks are 784 tokens, so that the 16 attention layers' pages match the 48 DeltaNet layers' state | 346,928 tokens: 21.2 |
+| One request via OpenEvolve's `LLMEnsemble` | 0.49 s, 11 completion tokens | 0.27 s, 14 |
+| 8 concurrent requests | 128 completion tokens in 0.56 s | 112 in 0.20 s |
+
+The replies were short, so these timings show the server works; they don't measure generation speed. The settings took effect:
+- **Thinking was off:** the reply was the function itself, in 11 tokens.
+- **Sampling:** vLLM's defaults became `temperature 1.0, top_k 20, top_p 0.8`, which is the checkpoint's defaults with the profile's `top_p`. OpenEvolve sends its own temperature (0.7) with each request.
+
+**What it means for a campaign:** the pilot's generation jobs sent their 24 requests as one batch, and `crc2-evolve-c2` sends 42.
+- **The pilot's peak:** in job 97960 (`crc2-evolve-c1`, generation 10), the 24 requests held 18.6% of the 7B's cache, about 64,500 tokens, after prefix caching (63% hits). That's more than this model's whole cache of 58,861 tokens, so a batch won't all run at once; vLLM queues the rest.
+- **Still to measure:** the time per generation, with a real-prompt test.
+- **An H100** would leave about eight times the cache (80 GB, about 40 GiB after the weights), and it runs FP8 natively.
 
 **R6** (job 93362, same server settings, OpenEvolve's real prompts, one request at a time):
 

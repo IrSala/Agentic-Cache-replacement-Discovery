@@ -207,7 +207,7 @@ slurm/                          batch jobs (submit from the repo root on g17)
   mail_test.sbatch              tests mail delivery from HPC3 (make mail-test)
 configs/champsim/baseline.json  ChampSim configuration for baseline builds
 configs/runs/                   run specs: one OpenEvolve run configuration each, naming the parts below (docs/run-specs.md)
-configs/models/                 model profiles: qwen2.5-coder-7b-v1.env, fake-v1.env
+configs/models/                 model profiles: qwen2.5-coder-7b-v1.env, qwen3.6-27b-fp8-v1.env, fake-v1.env
 configs/prompts/                prompt profiles: a system message and OpenEvolve template overrides per directory
 configs/search/                 search profiles: OpenEvolve database and evolution settings
 configs/llm/vllm.env            the pinned vLLM image, shared by all model profiles
