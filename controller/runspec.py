@@ -74,7 +74,8 @@ NODE_CPUS = 56                         # HPC3's CPU nodes (docs/sjsu-hpc-workflo
 EVALUATOR_KEYS = {"policy": str, "experiment": str, "openevolve_file": str, "executor": str,
                   "parallel_candidates": int, "cpus_per_candidate": int, "timeout_s": int, "openevolve": dict,
                   "duplicate_screen": dict}
-SCREEN_KEYS = {"trace": str}           # evaluator.duplicate_screen (docs/levers/evaluation/duplicate-screen.md)
+SCREEN_KEYS = {"trace": object}        # evaluator.duplicate_screen (docs/levers/evaluation/duplicate-screen.md):
+                                       # a trace id or a list of them, checked in screen_problems
 SCREEN_OPTIONAL = {"audit_every": int}
 SCREEN_DEFAULTS = {"audit_every": 10}  # every 10th match still runs every trace; 0 turns audits off
 PROFILE_KEYS = {"prompt": {"description": str, "requires": dict, "openevolve": dict},
@@ -155,11 +156,18 @@ def schema_problems(data, required, optional, where):
 def screen_problems(screen, cls, manifest, campaign):
     """What's wrong with an evaluator.duplicate_screen setting (evaluator/screen.py)."""
     where = "evaluator: duplicate_screen"
+    value = screen.get("trace")
+    names = [value] if isinstance(value, str) else value
+    if "trace" in screen and not (isinstance(names, list) and names and all(isinstance(n, str) for n in names)
+                                  and len(set(names)) == len(names)):
+        return [f"{where}: trace must be a trace id or a list of different ones"]
     found = schema_problems(screen, SCREEN_KEYS, SCREEN_OPTIONAL, where)
     if found:
         return found
-    if screen["trace"] not in [t["id"] for t in manifest["traces"]]:
-        found.append(f"{where}: {screen['trace']} is not one of {manifest.experiment_id}'s traces")
+    ids = [t["id"] for t in manifest["traces"]]
+    for name in names:
+        if name not in ids:
+            found.append(f"{where}: {name} is not one of {manifest.experiment_id}'s traces")
     if screen.get("audit_every", 0) < 0:
         found.append(f"{where}: audit_every must be 0 (no audits) or more")
     if cls is not None and not cls.supports_screen:
@@ -727,6 +735,10 @@ def selftest():
         case("screen on a trace not in the manifest", resolved(screened("st", {"trace": "bzip2_183B"})),
              "is not one of")
         case("screen with an unknown key", resolved(screened("sk", {"trace": gcc, "every": 3})), "unknown key")
+        case("screen on a list with a repeat", resolved(screened("sr", {"trace": [gcc, gcc]})), "list of different ones")
+        case("screen on an empty list", resolved(screened("se", {"trace": []})), "list of different ones")
+        case("screen on a list with a trace not in the manifest", resolved(screened("sl", {"trace": [gcc, "soplex_66B"]})),
+             "soplex_66B is not one of")
         case("screen outside a campaign", resolved(variant("sc", lambda d: d["evaluator"].update(
             duplicate_screen={"trace": gcc}))), "works only in a campaign")
         case("screen with an OpenEvolve file", resolved(variant("so", lambda d: d["evaluator"].update(

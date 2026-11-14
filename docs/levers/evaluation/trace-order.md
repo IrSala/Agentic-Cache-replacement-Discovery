@@ -30,6 +30,12 @@ Can a candidate run on fewer CPUs than it has traces and still finish when its s
 
 **On HPC3 (jobs 98637–98639):** results were identical on 8 CPUs.
 
+**2026-11-13: `crc2-evolve-c2`'s acceptance run** (`crc2-evolve-c2-screen-test`, 2 generations × 42 candidates × 8 CPUs, jobs 113743–113810; `make campaign-report`):
+- **Efficiency 69%:** 131.2 of 189.9 CPU-hours held were spent simulating, against 44% for the pilot on 14 CPUs.
+- **Per evaluation:** 2.64 CPU-hours held.
+- **Each generation's evaluation:** 54 and 60 minutes until the last task finished. That's 23 minutes after half the tasks in generation 2. In generation 1, half had failed within the first minute.
+- The duplicate screen was on but screened only one candidate, so it barely changes these numbers.
+
 ## Costs and risks
 
 - **Results:** none. Each trace is an independent, deterministic simulation.
@@ -38,7 +44,7 @@ Can a candidate run on fewer CPUs than it has traces and still finish when its s
 ## Decision and next step
 
 - **Decision:** always on, with no switch.
-- **Next:** `crc2-evolve-c2` runs 42 candidates on 8 CPUs each. Its acceptance run measures the real efficiency. Below 80%, the next lever is one 1-CPU task per trace (`docs/campaigns.md` §8).
+- **Next:** `crc2-evolve-c2` runs 42 candidates on 8 CPUs each. Its acceptance run measured 69% efficiency, below the 80% at which `docs/campaigns.md` §8 says to build the next lever: one 1-CPU task per trace.
 
 ## Sources
 

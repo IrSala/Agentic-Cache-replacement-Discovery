@@ -156,12 +156,13 @@ def describe(summary):
     parts.append("cycles " + ", ".join(f"{t}={c}" for t, c in summary["cycles"].items()))
     s = summary.get("screen")
     if s:
+        on = screen_mod.label(s["trace"])
         if screened(summary):
-            parts.append(f"screened on {s['trace']}: the scores of {s['matched']} (generation {s['matched_generation']})")
+            parts.append(f"screened on {on}: the scores of {s['matched']} (generation {s['matched_generation']})")
         elif s.get("conflict"):
-            parts.append(f"screen matched {s['matched']} on {s['trace']} but {s['conflict']} differed: evaluated in full")
+            parts.append(f"screen matched {s['matched']} on {on} but {s['conflict']} differed: evaluated in full")
         elif s.get("audited") and s.get("matched"):
-            parts.append(f"screen audit: matched {s['matched']} on {s['trace']}, evaluated in full")
+            parts.append(f"screen audit: matched {s['matched']} on {on}, evaluated in full")
     if summary.get("reason"):
         parts.append("reason: " + summary["reason"].splitlines()[0][:160])
     return "; ".join(parts) + ("  [cached]" if summary.get("cached") else "")
@@ -259,12 +260,14 @@ def screen_selftest(tmp, seed, body, common):
     first = candidate_from_text(seed)
     s0 = evaluate(manifest, first, out_dir=evals / first.candidate_id, baseline_dir=base_dir,
                   campaign_id="selftest", generation=0, **common)
-    key = screen_mod.key(json.loads((evals / first.candidate_id / "bzip2_183B.json").read_text()))
+    rec = {t: json.loads((evals / first.candidate_id / f"{t}.json").read_text()) for t in ids}
+    key = screen_mod.key(rec["bzip2_183B"])
+    key2 = screen_mod.key([rec["bzip2_183B"], rec["astar_163B"]])
     entry = {"candidate": first.candidate_id, "generation": 0, "cycles": [s0["cycles"][t] for t in ids]}
     variant = candidate_from_text(seed.replace(body, "    // a comment-only change\n" + body))
 
-    def run(case, index, audit=False, campaign="selftest", screen=True):
-        scr = {"trace": "bzip2_183B", "index": index, "audit": audit, "evaluations": str(evals)} if screen else None
+    def run(case, index, audit=False, campaign="selftest", screen=True, trace="bzip2_183B"):
+        scr = {"trace": trace, "index": index, "audit": audit, "evaluations": str(evals)} if screen else None
         return evaluate(manifest, variant, out_dir=tmp / "screen-cases" / case, baseline_dir=base_dir,
                         campaign_id=campaign, generation=1, screen=scr, **common)
 
@@ -291,6 +294,13 @@ def screen_selftest(tmp, seed, body, common):
     other = run("match", {}, campaign="another", screen=False)
     check("screen: reused only by its own campaign", again.get("cached") and not other.get("cached")
           and not screened(other) and sorted(other["traces"]) == sorted(ids), other)
+    pair = ["bzip2_183B", "astar_163B"]
+    m2 = run("match-two", {key2: entry}, trace=pair)
+    check("screen: two traces match on both", screened(m2) and m2["fitness"] == s0["fitness"]
+          and set(pair) <= set(m2["traces"]) and m2["screen"]["trace"] == pair
+          and key == screen_mod.key([rec["bzip2_183B"]]) and key2.startswith(key + "|"), m2)
+    n2 = run("no-match-two", {key: entry}, trace=pair)
+    check("screen: one trace's key doesn't match two", not screened(n2) and sorted(n2["traces"]) == sorted(ids), n2)
 
     stop = threading.Event()
     threading.Timer(0.3, stop.set).start()

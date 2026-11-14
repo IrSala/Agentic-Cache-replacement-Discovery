@@ -239,6 +239,16 @@ def makespan(times, workers):
     return max(loads)
 
 
+def schedule(times, workers):
+    """Each run's (start, end) when `workers` CPUs take these run times in order, as makespan does."""
+    free, out = [0.0] * max(1, workers), []
+    for t in times:
+        start = heapq.heappop(free)
+        out.append((start, start + t))
+        heapq.heappush(free, start + t)
+    return out
+
+
 def estimate(spec_ref):
     path = runspec.spec_path(spec_ref)
     spec = runspec.load_yaml(path, "spec")

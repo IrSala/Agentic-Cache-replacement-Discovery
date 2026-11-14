@@ -577,7 +577,12 @@ def update_screen_index(c, g):
     """The duplicate screen's behaviors after generation g (generations/<g>/screen-index.json): g-1's index
     plus g's fully evaluated behaviors (evaluator/screen.py). Generation g+1's tasks read it. A full evaluation
     that matched a known behavior (an audit, or a conflict found while screening) and differs from it is a
-    false match: it's logged once, and its key becomes ambiguous through the merge."""
+    false match: it's logged once, and its key becomes ambiguous through the merge.
+
+    Cached results are indexed too: one scored by another campaign (such as the seed) is new to this index,
+    and one this campaign scored earlier merges as the same behavior. They're left out of the counts and the
+    false-match check, which belong to the generation that evaluated them. `audited` counts audits of
+    matches: candidates that matched a behavior and ran every trace anyway."""
     path = c.gen_dir(g) / SCREEN_INDEX
     rerun = path.exists()
     ds = c.meta["evaluator"]["duplicate_screen"]
@@ -589,23 +594,25 @@ def update_screen_index(c, g):
     gd = c.gen_dir(g)
     for cand in dict.fromkeys(read_json(gd / "tasks.json", [])):
         s = (read_json(gd / "results" / f"{cand}.json", {}) or {}).get("summary")
-        if not s or s.get("cached"):
-            continue                    # a cached result was counted when it was evaluated
+        if not s:
+            continue
+        cached = s.get("cached")        # counted and checked where it was evaluated
         info = s.get("screen") or {}
         if ec.screened(s):
-            counts["screened"] += 1
+            counts["screened"] += not cached
             continue
-        counts["audited"] += bool(info.get("audited"))
-        counts["conflicts"] += bool(info.get("conflict"))
+        if not cached:
+            counts["audited"] += bool(info.get("audited") and info.get("matched"))
+            counts["conflicts"] += bool(info.get("conflict"))
         cycles = s.get("cycles") or {}
-        if info.get("matched"):
+        if info.get("matched") and not cached:
             want = (read_json(evals / info["matched"] / "summary.json", {}) or {}).get("cycles") or {}
             if s["status"] != "completed" or any(cycles.get(t) != want.get(t) for t in traces):
                 false.append({"candidate": cand, "matched": info["matched"], "status": s["status"],
                               "traces": [t for t in traces if cycles.get(t) != want.get(t)]})
         if s["status"] != "completed":
             continue
-        k = screen_mod.key(read_json(evals / cand / f"{ds['trace']}.json", {}) or {})
+        k = screen_mod.key([read_json(evals / cand / f"{t}.json", {}) or {} for t in screen_mod.trace_list(ds["trace"])])
         if k:
             vector = tuple(cycles[t] for t in traces)
             found.setdefault(k, {})[vector] = {"candidate": cand, "generation": g, "cycles": list(vector)}
@@ -1092,6 +1099,20 @@ def selftest(keep=False):
               same_gen["matches"] == 0 and both["wrong"] == 1 and both["ambiguous"] == 1
               and dv.screen_rows([(0, [("a", A), ("b", B)]), (1, [("a2", A2)])], ["s", "x"], ["x", "s"], "s", 2)
               ["ambiguous"] == 1)
+        # Two screening traces: a behavior that ties on s but not on t isn't matched, and the match is known
+        # when the longer of them ends. On 2 CPUs: t 0-1440 s, s 0-360, then x 360-3960; in full 3600.
+        A = {"s": rec(10, 1, 360), "t": rec(30, 3, 1440), "x": rec(100, 5, 3600)}
+        B = {"s": rec(10, 1, 360), "t": rec(31, 3, 1440), "x": rec(100, 5, 3600)}
+        gens = [(0, [("a", A)]), (1, [("b", B), ("a2", dict(A))])]
+        one = dv.screen_rows(gens, ["s", "t", "x"], ["x", "t", "s"], "s", 2)
+        two = dv.screen_rows(gens, ["s", "t", "x"], ["x", "t", "s"], ["s", "t"], 2)
+        check("(screen) replay on two traces: fewer wrong matches, timed by the longer one",
+              (one["matches"], one["wrong"]) == (2, 1) and (two["matches"], two["wrong"]) == (1, 0)
+              and (two["skipped_cpu_hours"], two["stopped_cpu_hours"], two["held_freed_cpu_hours"],
+                   two["held_added_cpu_hours"]) == (1.0, 0.3, 1.2, 0.4),
+              f"one trace {one['matches']} matches, {one['wrong']} wrong; two {two['matches']}, {two['wrong']}; "
+              f"skipped {two['skipped_cpu_hours']}, before the match {two['stopped_cpu_hours']}, freed "
+              f"{two['held_freed_cpu_hours']}, added {two['held_added_cpu_hours']}")
         rep = dv.screen_replay(c)
         check("(screen) campaign-screen: every trace replayed on this campaign",
               len(rep["per_trace"]) == len(c.manifest()["traces"])
@@ -1106,7 +1127,7 @@ def selftest(keep=False):
         evals_root.rename(aside)
         try:
             data = json.loads(json.dumps(spec))
-            data["evaluator"]["duplicate_screen"] = {"trace": "bzip2_183B", "audit_every": 0}
+            data["evaluator"]["duplicate_screen"] = {"trace": ["bzip2_183B", "soplex_66B"], "audit_every": 0}
             (tmp / "campaign-screen.yaml").write_text(yaml.safe_dump(data))
             cs = start(tmp / "campaign-screen.yaml", name="selftest-screen", executor="local")
             drain_local(cs)
@@ -1132,7 +1153,9 @@ def selftest(keep=False):
             fp = dv.fingerprint(evals_on, screened[0], ids) if screened else None
             report_on = report.campaign_report(cs)
             check("(screen) the index, the generation summaries, diversity and the report know it",
-                  idx.get("trace") == "bzip2_183B" and idx.get("behaviors") and not idx.get("false_matches")
+                  idx.get("trace") == ["bzip2_183B", "soplex_66B"] and idx.get("behaviors") and not idx.get("false_matches")
+                  and all(on[k]["screen"]["trace"] == ["bzip2_183B", "soplex_66B"]
+                          and {"bzip2_183B", "soplex_66B"} <= set(on[k]["traces"]) for k in screened)
                   and sum(read_json(cs.gen_dir(g) / "summary.json")["screen"]["screened"] for g in range(4)) == len(screened)
                   and fp is not None and fp.get("screened_from") and report_on["screened"] == len(screened),
                   f"{len(idx.get('behaviors', {}))} key(s), report {report_on['screened']} screened")
@@ -1152,6 +1175,11 @@ def selftest(keep=False):
                 r["summary"]["screen"] = {**r["summary"]["screen"], "audited": True}
                 r["summary"]["cycles"] = {**want, ids[-1]: want[ids[-1]] + 1}
                 results.write_atomic(rpath, r)
+                # Beside it, a candidate chosen for audit that matched nothing: not an audit of a match.
+                idle = "0" * 16
+                results.write_atomic(cs.gen_dir(g) / "results" / f"{idle}.json", {"candidate_id": idle, "summary": {
+                    "status": "compile_failed", "screen": {"trace": "bzip2_183B", "matched": None, "audited": True}}})
+                results.write_atomic(cs.gen_dir(g) / "tasks.json", read_json(cs.gen_dir(g) / "tasks.json") + [idle])
                 (cs.gen_dir(g) / SCREEN_INDEX).unlink()
                 update_screen_index(cs, g)
                 again = read_json(cs.gen_dir(g) / SCREEN_INDEX)
@@ -1159,6 +1187,24 @@ def selftest(keep=False):
                 check("(screen) a false match is caught", len(again["false_matches"]) == 1 and again["ambiguous"] == 1
                       and len(logged) == 1 and logged[0]["candidate"] == cand and logged[0]["traces"] == [ids[-1]],
                       f"{len(again['false_matches'])} false match, {again['ambiguous']} ambiguous key(s)")
+                check("(screen) only audits of a match count as audits", again["audited"] == 1,
+                      f"{again['audited']} audit(s)")
+
+            # A result another campaign scored is a known behavior too (crc2-evolve-c2-screen-test's seed,
+            # cached from crc2-evolve-c1, was left out until 2026-11-13). Here the seed's result is marked cached.
+            seed_id = read_json(cs.gen_dir(0) / "tasks.json")[0]
+            before = read_json(cs.gen_dir(0) / SCREEN_INDEX)
+            rpath = cs.gen_dir(0) / "results" / f"{seed_id}.json"
+            r = read_json(rpath)
+            r["summary"]["cached"] = True
+            results.write_atomic(rpath, r)
+            (cs.gen_dir(0) / SCREEN_INDEX).unlink()
+            update_screen_index(cs, 0)
+            after = read_json(cs.gen_dir(0) / SCREEN_INDEX)
+            check("(screen) a seed scored by another campaign is a known behavior",
+                  after["behaviors"] and after["behaviors"] == before["behaviors"] and not after["false_matches"]
+                  and not any(after[k] for k in ("screened", "audited", "conflicts")),
+                  f"{len(after['behaviors'])} behavior(s) after generation 0")
         finally:
             shutil.rmtree(evals_root, ignore_errors=True)
             aside.rename(evals_root)

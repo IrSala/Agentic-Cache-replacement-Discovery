@@ -9,10 +9,10 @@ Stages (evaluator/policies/base.py):
   run           every trace, up to ctx.jobs at a time, under prlimit and a
                 process-group timeout, each in its own directory used as HOME.
                 With a duplicate screen (ctx.screen, evaluator/screen.py), the
-                screening trace starts first; when its result matches a behavior
-                in the index, the other traces are stopped or skipped and the
-                candidate gets that behavior's scores (unless it's an audit,
-                which runs every trace anyway)
+                screening traces (one or several) start first; when their results
+                match a behavior in the index, the other traces are stopped or
+                skipped and the candidate gets that behavior's scores (unless it's
+                an audit, which runs every trace anyway)
   score         the manifest's fitness function, against LRU baselines built
                 the same way (and by the same compiler)
 
@@ -124,15 +124,17 @@ class ChampsimIPC(Policy):
     def run(self, candidate, build, ctx):
         """Every trace, longest first; the records come back in the manifest's order, so the
         outcome (including which failure is reported first) doesn't depend on the order run.
-        With a screen, its trace starts first, and a match stops the rest (see score)."""
+        With a screen, its traces start first, longest first, and a match stops the rest (see score)."""
         env = results.environment(build.binary, cb.BASE_CONFIG, self._config_path)
         traces = ctx.manifest["traces"]
         ordered = run_order(traces, ctx.baselines)
         self._screen, cancel = None, None
         if ctx.screen:
-            first = ctx.screen["trace"]
-            ordered = [t for t in ordered if t["id"] == first] + [t for t in ordered if t["id"] != first]
-            self._screen = {"trace": first, "matched": None, "matched_generation": None,
+            self._screen_traces = screen_mod.trace_list(ctx.screen["trace"])
+            self._screen_records = {}
+            ordered = ([t for t in ordered if t["id"] in self._screen_traces]
+                       + [t for t in ordered if t["id"] not in self._screen_traces])
+            self._screen = {"trace": ctx.screen["trace"], "matched": None, "matched_generation": None,
                             "audited": bool(ctx.screen.get("audit")), "stopped_seconds": 0.0}
             self._screen_lock = threading.Lock()
             cancel = None if ctx.screen.get("audit") else threading.Event()
@@ -152,14 +154,15 @@ class ChampsimIPC(Policy):
         return [done[t["id"]] for t in traces if done[t["id"]] is not None]
 
     def _screen_conflict(self, done):
-        """The first trace, other than the screening one, that finished and disagrees with the matched
+        """The first trace, other than the screening ones, that finished and disagrees with the matched
         behavior's cycles (or failed), when a screen matched and wasn't an audit; else None."""
         screen = self._screen
         if not screen or not screen.get("summary") or screen["audited"]:
             return None
         want = screen["summary"].get("cycles") or {}
         for tid, r in done.items():
-            if r is not None and tid != screen["trace"] and (r["status"] != "completed" or r["cycles"] != want.get(tid)):
+            if (r is not None and tid not in self._screen_traces
+                    and (r["status"] != "completed" or r["cycles"] != want.get(tid))):
                 return tid
         return None
 
@@ -194,7 +197,7 @@ class ChampsimIPC(Policy):
 
     def _screened(self, build, records):
         """A match: the matched behavior's scores, with this candidate's own build time. The records
-        are the ones that finished (the screening trace's, and any that ended before the match)."""
+        are the ones that finished (the screening traces', and any that ended before the match)."""
         matched = self._screen["summary"]
         metrics = dict(matched["metrics"])
         metrics["build_seconds"] = round(build.seconds, 2)
@@ -206,9 +209,9 @@ class ChampsimIPC(Policy):
         info["stopped_seconds"] = round(info["stopped_seconds"], 2)
         return info
 
-    def _check_screen(self, ctx, record, cancel):
-        """After the screening trace: look its result up, and on a match stop the other traces."""
-        entry = screen_mod.lookup(ctx.screen["index"], record)
+    def _check_screen(self, ctx, records, cancel):
+        """After the last screening trace: look their results up, and on a match stop the other traces."""
+        entry = screen_mod.lookup(ctx.screen["index"], records)
         if not entry:
             return
         try:
@@ -301,8 +304,12 @@ class ChampsimIPC(Policy):
                 record = self._write(ctx, results.make_record(status="completed", metrics=metrics, exit_code=0,
                                                               run_seconds=seconds, started_at=started,
                                                               finished_at=finished, **common))
-                if self._screen is not None and tid == self._screen["trace"]:
-                    self._check_screen(ctx, record, cancel)
+                if self._screen is not None and tid in self._screen_traces:
+                    with self._screen_lock:
+                        self._screen_records[tid] = record
+                        last = len(self._screen_records) == len(self._screen_traces)
+                    if last:                # every screening trace completed; one that failed means no match
+                        self._check_screen(ctx, [self._screen_records[t] for t in self._screen_traces], cancel)
                 return record
         return self._write(ctx, results.make_record(status=status, error_summary=summary, exit_code=r.exit_code,
                                                     run_seconds=seconds, started_at=started, finished_at=finished,

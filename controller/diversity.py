@@ -54,7 +54,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from controller import campaign as cp  # noqa: E402
 from controller import runspec  # noqa: E402
-from controller.report import makespan, trace_records  # noqa: E402
+from controller.report import makespan, schedule, trace_records  # noqa: E402
 from evaluator import evaluate_candidate as ec  # noqa: E402
 from evaluator import screen as screen_mod  # noqa: E402
 from evaluator.policies.champsim_ipc import run_order  # noqa: E402
@@ -373,8 +373,13 @@ def screen_rows(generations, traces, order, screen, cpus):
     candidate once, at its first appearance. order: the traces longest first. A candidate can
     match only behaviors that earlier generations completed on every trace, since a generation's
     candidates run at the same time. A screening result shared by two different behaviors is
-    ambiguous and never screened. Times are the records' run seconds on `cpus` CPUs."""
-    rest = [t for t in order if t != screen]
+    ambiguous and never screened. Times are the records' run seconds on `cpus` CPUs.
+
+    screen: one trace or a list. The screening traces start first, longest first, and a match is
+    known when the last of them ends. stopped: the time the other traces ran before then."""
+    screens = screen_mod.trace_list(screen)
+    first = [t for t in order if t in screens]
+    rest = [t for t in order if t not in screens]
     index, out, wrong = {}, dict(candidates=0, matches=0, ambiguous=0, simulated_s=0.0, skipped_s=0.0,
                                  stopped_s=0.0, held_s=0.0, held_freed_s=0.0, held_added_s=0.0), []
     for g, cands in generations:
@@ -389,9 +394,12 @@ def screen_rows(generations, traces, order, screen, cpus):
             full = makespan([times[t] for t in order], cpus)
             out["simulated_s"] += sum(times.values())
             out["held_s"] += cpus * full
-            s = recs.get(screen) or {}
-            key = (s.get("cycles"), s.get("misses")) if s.get("status") == "completed" else None
+            screened_recs = [recs.get(t) or {} for t in screens]
+            key = (tuple((s.get("cycles"), s.get("misses")) for s in screened_recs)
+                   if all(s.get("status") == "completed" for s in screened_recs) else None)
             hit = index.get(key) if key else None
+            plan = dict(zip(first + rest, schedule([times[t] for t in first + rest], cpus)))
+            decided = max(plan[t][1] for t in first)
             if hit == screen_mod.AMBIGUOUS:
                 out["ambiguous"] += 1
                 hit = None
@@ -402,13 +410,12 @@ def screen_rows(generations, traces, order, screen, cpus):
                     wrong.append({"generation": g, "candidate": cand,
                                   "why": "failed on another trace" if vector is None else "differs on another trace",
                                   "distance": None if vector is None else round(distance(vector, hit), 6)})
-                st = times[screen]
-                stopped = sum(min(times[t], st) for t in rest[:max(0, cpus - 1)])
-                out["skipped_s"] += sum(times.values()) - st
-                out["stopped_s"] += stopped
-                out["held_freed_s"] += cpus * (full - st)
+                out["skipped_s"] += sum(times.values()) - sum(times[t] for t in first)
+                out["stopped_s"] += sum(max(0.0, min(end, decided) - start) for t, (start, end) in plan.items()
+                                        if t not in screens)
+                out["held_freed_s"] += cpus * (full - decided)
             else:
-                out["held_added_s"] += cpus * (makespan([times[screen]] + [times[t] for t in rest], cpus) - full)
+                out["held_added_s"] += cpus * (max(end for _, end in plan.values()) - full)
             if vector is not None and key:
                 found.setdefault(key, {})[vector] = {"candidate": cand, "generation": g, "cycles": vector}
         screen_mod.merge(index, found)
@@ -422,10 +429,13 @@ def screen_rows(generations, traces, order, screen, cpus):
 
 
 def screen_replay(c, trace=None, cpus=None):
+    """Every trace replayed as a screen on its own, and in detail `trace` (one trace or a list), or
+    else the clean trace that frees the most CPU-hours."""
     manifest = c.manifest()
     traces = [t["id"] for t in manifest["traces"]]
-    if trace and trace not in traces:
-        raise ValueError(f"{trace} is not one of {manifest.experiment_id}'s traces")
+    bad = [t for t in screen_mod.trace_list(trace or []) if t not in traces]
+    if bad:
+        raise ValueError(f"{', '.join(bad)} is not one of {manifest.experiment_id}'s traces")
     root = ec.results_root()
     evals = root / "evaluations" / manifest.experiment_id / c.meta["evaluator"]["policy"]
     baselines = ec.load_baselines(manifest, root / "baselines" / manifest.experiment_id)
@@ -450,7 +460,7 @@ def screen_replay(c, trace=None, cpus=None):
     per_trace = [screen_rows(generations, traces, order, t, cpus) for t in traces]
     clean = [r for r in per_trace if r["wrong"] == 0]
     best = max(clean, key=lambda r: r["held_freed_cpu_hours"] - r["held_added_cpu_hours"], default=None)
-    detail = next(r for r in per_trace if r["trace"] == trace) if trace else best
+    detail = screen_rows(generations, traces, order, trace, cpus) if trace else best
     return {"campaign": c.id, "experiment": manifest.experiment_id, "traces": len(traces), "cpus": cpus,
             "per_trace": per_trace, "detail": detail}
 
@@ -469,13 +479,13 @@ def print_screen(r):
     if not d:
         print("  every trace has wrong matches; no screen is safe on this campaign's records")
         return
-    print(f"  {d['trace']}: {d['matches']} of {d['candidates']} new candidates matched an earlier generation's "
+    print(f"  {screen_mod.label(d['trace'])}: {d['matches']} of {d['candidates']} new candidates matched an earlier generation's "
           f"behavior; {d['wrong']} wrong; {d['ambiguous']} not screened (ambiguous); {d['behaviors_indexed']} "
           f"behaviors indexed, {d['ambiguous_keys']} ambiguous keys")
     print(f"    simulation: {d['skipped_cpu_hours']} of {d['simulated_cpu_hours']} CPU-hours skipped, "
-          f"{d['stopped_cpu_hours']} spent on runs stopped early")
+          f"{d['stopped_cpu_hours']} spent on other traces before the match was known")
     print(f"    held at {d['cpus']} CPUs: {d['held_freed_cpu_hours']} CPU-hours freed by matches, "
-          f"{d['held_added_cpu_hours']} added by starting the screening trace first, of {d['held_cpu_hours']}")
+          f"{d['held_added_cpu_hours']} added by starting the screening traces first, of {d['held_cpu_hours']}")
     for w in d["wrong_matches"][:20]:
         gap = "" if w["distance"] is None else f", {w['distance']:.3%} apart"
         print(f"    wrong: g{w['generation']} {w['candidate']} ({w['why']}{gap})")
@@ -532,13 +542,13 @@ def main():
     parser.add_argument("--json", action="store_true")
     parser.add_argument("--thresholds", default=",".join(str(t) for t in DEFAULT_THRESHOLDS),
                         help="relative per-trace cycle differences treated as the same behavior (default 0.001,0.01)")
-    parser.add_argument("--screen", nargs="?", const="", metavar="TRACE",
-                        help="replay the duplicate screen instead, detailed for TRACE")
+    parser.add_argument("--screen", nargs="?", const="", metavar="TRACE[,TRACE...]",
+                        help="replay the duplicate screen instead, detailed for TRACE (or several, comma-separated)")
     parser.add_argument("--cpus", type=int, help="with --screen: CPUs per candidate (default: the campaign's)")
     args = parser.parse_args()
     try:
         if args.screen is not None:
-            r = screen_replay(cp.Campaign(args.campaign), args.screen or None, args.cpus)
+            r = screen_replay(cp.Campaign(args.campaign), [t for t in args.screen.split(",") if t] or None, args.cpus)
             print(json.dumps(r, indent=1)) if args.json else print_screen(r)
             return 0
         thresholds = tuple(float(t) for t in args.thresholds.split(",") if t)

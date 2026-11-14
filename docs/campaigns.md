@@ -319,6 +319,11 @@ A checkpoint can hold fewer programs than were added. When a program takes over 
 - the same estimated cost per generation as the pilot's spec, for 1.75× the candidates
 - its search profile keeps `population_size: 50`, for comparability with the pilot. With 42 new programs per generation the population turns over faster, and a larger population is a lever to try
 
+**c2's acceptance run (2026-11-13; `crc2-evolve-c2-screen-test`, jobs 113743–113810).** These are 2 generations of c2's spec, with the duplicate screen on.
+- **Efficiency 69%:** 131.2 of 189.9 CPU-hours held were spent simulating, against the pilot's 44%. That's below the 80% trigger for step 1 below.
+- **Time:** 2.0 hours in all, with about 2–3 min per generation job and 54–60 min per evaluation.
+- **Failures:** 41 of 84 replies failed to build or run, about as often as the pilot's first two generations.
+
 **What comes next, and when** (decided 2026-10-29, from the measurements above):
 1. **One 1-CPU task per (candidate, trace).**
    - **How:** an array over the pairs, longest first. Each task runs `evaluate(..., trace=)`, as `slurm/calibrate_array.sbatch` does, and aggregation scores the 14 records.
@@ -414,7 +419,12 @@ A checkpoint can hold fewer programs than were added. When a program takes over 
 **The duplicate screen** builds on this: run one trace first, and skip the other 13 when its result matches a behavior the campaign has already measured.
 - **On the pilot:** `make campaign-screen C=crc2-evolve-c1 CPUS=8` replays it from the records. Screening on bzip2, 83 of 162 new candidates match an earlier generation's behavior with no wrong match, skipping 61% of the simulation. bzip2 is the only trace without a wrong match.
 - **Built (2026-11-13), off by default:** a run spec turns it on with `evaluator.duplicate_screen`. It's tested locally, not yet run on HPC3.
-- **First run on HPC3:** `crc2-evolve-c2-screen-test`, c2's acceptance run (2 generations, about 478 CPU-hours estimated without the screen). It screens on bzip2 and audits every second match.
+- **First run on HPC3 (2026-11-13):** `crc2-evolve-c2-screen-test`, c2's acceptance run, screening on bzip2 and auditing candidates with an even id.
+  - 6 candidates matched; 1 was screened correctly.
+  - Audits caught 2 false matches: LRU candidates matched a near-LRU behavior that ties LRU on bzip2.
+  - **The cause:** an indexing bug, fixed the same day. The seed, scored from the pilot's cache, was never indexed.
+  - **Even with the bug fixed,** bzip2 would have made one wrong match, 0.010% off. bzip2 and soplex together separate every behavior in both campaigns.
+- **Screening on bzip2 and soplex (decided 2026-11-13):** `trace: [bzip2_183B, soplex_66B]`. It's built and tested locally, with no wrong match in either campaign's replay. The longer screen costs 43% of the CPU-hours it frees on the pilot: 235 of 812 instead of 412.
 - **Still to run:** the same replay on `crc2-evolve-c2`'s records.
 - The design, the evidence and the decisions are in `docs/levers/evaluation/duplicate-screen.md`.
 

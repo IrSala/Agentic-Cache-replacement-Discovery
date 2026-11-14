@@ -57,7 +57,7 @@ Records of a single-trace array task (`evaluate_candidate --trace`) carry the fu
 
 There is one JSON record per (candidate, trace). Every pair in the manifest gets exactly one record; a compile failure writes one `compile_failed` record per trace.
 
-**The one exception: a duplicate screen** (`evaluator.duplicate_screen`, `docs/levers/evaluation/duplicate-screen.md`). A candidate whose screening trace matched a behavior already measured has records only for the traces it ran. Its `summary.json` carries `screen: {trace, matched, matched_generation, audited, stopped_seconds}` (and `conflict` when a finished trace disagreed, after which every trace ran), and its fitness and metrics are the matched behavior's.
+**The one exception: a duplicate screen** (`evaluator.duplicate_screen`, `docs/levers/evaluation/duplicate-screen.md`). A candidate whose screening traces matched a behavior already measured has records only for the traces it ran. `screen.trace` is the run spec's setting: one trace id, or a list of them. Its `summary.json` carries `screen: {trace, matched, matched_generation, audited, stopped_seconds}` (and `conflict` when a finished trace disagreed, after which every trace ran), and its fitness and metrics are the matched behavior's.
 
 - **Identity:** `schema_version`, `experiment_id`, `experiment_sha256`, `campaign_id`, `generation`, `candidate_id`, `candidate_sha256`, `trace_id`.
 - **Outcome:** `status`, `failure_class`, `error_summary`, `exit_code`, `build_seconds`, `run_seconds`.

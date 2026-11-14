@@ -182,8 +182,8 @@ campaign-diversity: venvs ## How many different behaviors a campaign found, judg
 	@[ -n "$(C)" ] || { echo "usage: make campaign-diversity C=crc2-evolve-c1" >&2; exit 2; }
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.diversity $(C)
 
-campaign-screen: venvs ## Replay the duplicate screen on a campaign's records (C=<id>, optional TRACE=<trace>, CPUS=<n>)
-	@[ -n "$(C)" ] || { echo "usage: make campaign-screen C=crc2-evolve-c1 [TRACE=bzip2_183B] [CPUS=8]" >&2; exit 2; }
+campaign-screen: venvs ## Replay the duplicate screen on a campaign's records (C=<id>, optional TRACE=<trace>[,<trace>...], CPUS=<n>)
+	@[ -n "$(C)" ] || { echo "usage: make campaign-screen C=crc2-evolve-c1 [TRACE=bzip2_183B,soplex_66B] [CPUS=8]" >&2; exit 2; }
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.diversity $(C) --screen $(TRACE) $(if $(CPUS),--cpus $(CPUS))
 
 campaign-selftest: venvs ## The staged pipeline end to end on this host: fake LLM, local executor, injected faults (~2 min)
