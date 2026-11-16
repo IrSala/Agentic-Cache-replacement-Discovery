@@ -35,7 +35,7 @@ The vLLM image is pinned in `configs/llm/vllm.env`, and each model in a profile,
 | Asset | Pin | Location | Status |
 |---|---|---|---|
 | Model | `Qwen/Qwen2.5-Coder-7B-Instruct` @ `c03e6d358207e414f1eca0bb1891e29f1db0e242` (Apache-2.0) | `models/Qwen2.5-Coder-7B-Instruct@c03e6d35` | **Downloaded and verified** (2026-10-15). Took 2 min 11 s with `make llm-fetch LLM_PARTS=model`. All 14 files match the Hub's sizes, and the 4 safetensors match its sha256. |
-| Model (profile `qwen3.6-27b-fp8-v1`) | `Qwen/Qwen3.6-27B-FP8` @ `a56219b8202864dc6d3e565be5ff1eea01f54cb4` (Apache-2.0) | `models/Qwen3.6-27B-FP8@a56219b8` | **Downloaded and verified** (2026-11-14). Took 4 min 29 s with `make llm-fetch PROFILE=qwen3.6-27b-fp8-v1 LLM_PARTS=model`. All 80 files match the Hub's sizes, and the 67 LFS files, including the 66 safetensors (30.9 GB), match its sha256. Served on an A100 in job 114550 (Measurements). |
+| Model (profile `qwen3.6-27b-fp8-v1`) | `Qwen/Qwen3.6-27B-FP8` @ `a56219b8202864dc6d3e565be5ff1eea01f54cb4` (Apache-2.0) | `models/Qwen3.6-27B-FP8@a56219b8` | **Downloaded and verified** (2026-11-14). Took 4 min 29 s with `make llm-fetch PROFILE=qwen3.6-27b-fp8-v1 LLM_PARTS=model`. All 80 files match the Hub's sizes, and the 67 LFS files, including the 66 safetensors (30.9 GB), match its sha256. Served on an A100 in job 114550 (Measurements), then on campaign prompts on an A100 (115959) and an H100 (115990) (R8). |
 | vLLM image | `vllm/vllm-openai@sha256:5f5e535216848d0c52159c8c13a0af04be5f6fe1a84e79914300610796f76d40` (v0.30.0-x86_64, CUDA 13.0.2) | `containers/vllm-openai_v0.30.0-x86_64.sif` | **Built and verified** (2026-10-16): 8,006,660,096 bytes, sha256 `40e8def6149a1d8924361f079ddf5a76b6ca8d53d518d550acc39a8e7f355584`. `import vllm` reports 0.30.0. |
 
 **Sharing one copy:** jobs only read these two paths, and the model is mounted read-only (`--bind …:/model:ro`).
@@ -128,8 +128,7 @@ The replies were short, so these timings show the server works; they don't measu
 
 **What it means for a campaign:** the pilot's generation jobs sent their 24 requests as one batch, and `crc2-evolve-c2` sends 42.
 - **The pilot's peak:** in job 97960 (`crc2-evolve-c1`, generation 10), the 24 requests held 18.6% of the 7B's cache, about 64,500 tokens, after prefix caching (63% hits). That's more than this model's whole cache of 58,861 tokens, so a batch won't all run at once; vLLM queues the rest.
-- **Still to measure:** the time per generation, with a real-prompt test.
-- **An H100** would leave about eight times the cache (80 GB, about 40 GiB after the weights), and it runs FP8 natively.
+- **Measured in R8 (below):** on an A100, a pilot batch took 527 s, against the 7B's 33 s. On an H100, whose cache is 8.6 times as large and which runs FP8 natively, pilot batches took 48–80 s.
 
 **R6** (job 93362, same server settings, OpenEvolve's real prompts, one request at a time):
 
@@ -185,3 +184,56 @@ OpenEvolve 0.4.0 behaviour behind `configs/openevolve/toy.yaml`:
 | LLM per iteration | about 12.3 s (mean 966 completion tokens at about 80 tokens/s) | about 16.8 s (mean 1,264 tokens) |
 | Evaluation per applied candidate | mean 34.9 s. Scored candidates took 0.5–7.4 s; the rest is 60 s timeouts. | mean 53.4 s (8 of 9 timed out) |
 | Largest prompt | 4,243 tokens | 7,204 tokens (+ 4,096 `max_tokens` ≤ 16,384) |
+
+## Campaign prompts replayed (R8)
+
+`controller/llm_replay.py` sends a campaign's recorded prompts to another model profile, a whole generation at a time, as a generation job sends them. Then it compares the replies with the recorded ones, so two models are compared on the same prompts. The comparison of what the replies are worth is in `docs/levers/generation/model.md`; this section covers serving.
+
+- **Run on HPC3:** `sbatch --export=ALL,PROFILE=<profile>,REPLAY=<campaign>:<gens>+… --exclude=cs002 slurm/llm_replay.sbatch` (an A100 by default; `--gres=gpu:h100:1` for an H100). `REPLAY` joins its sources with `+`, because `--export` splits on commas. It takes a generation job's resources (4 CPUs, 24G) and 1 hour by default; a `--time` on the command line overrides it.
+- **Settings:** each request gets its source campaign's temperature and `max_tokens`, which must equal the profile's, or the run is refused. The timeout is 3,600 s with no retries, so a request's whole latency is measured. Under a campaign's settings, a request past the profile's timeout would have been cancelled and resent.
+- **Records:** `$AFAR_RESULTS/llm-replay/<profile>-<job>/`
+  - `run.json`: the profile, model, server arguments, settings, and each job's node, GPU and commit
+  - `batches/<campaign>-g<N>.json`: every reply with its tokens and seconds, the batch's seconds, the source's recorded LLM time, and vLLM's `/metrics` counters before and after
+  - `OUT=<dir>` adds to an existing replay of the same profile and skips the batches it already has.
+- **Check on coe-hpc1:** `make llm-replay-check R=<profile>-<job>` writes `check.json` and prints the funnel, the paired counts and a timing table per batch.
+  - Peak running and waiting requests, KV cache use and generation throughput come from vLLM's 10-second stats lines in `logs/vllm-<job>.log`, within the batch's own window.
+  - Preemptions and prefix-cache hits come from the `/metrics` counters, since vLLM's V1 engine doesn't log preemptions.
+  - On a compile failure, `check.json` keeps gcc's first error.
+- **Self-test:** `make llm-replay-selftest` (seconds, a stand-in model).
+
+**Qwen3.6-27B FP8 on 324 recorded prompts** (2026-11-14 and 15, profile `qwen3.6-27b-fp8-v1`, thinking off). The prompts are `crc2-evolve-c1` generations 1–10 (24 each) and `crc2-evolve-c2-screen-test` generations 1–2 (42 each); both jobs wrote to `qwen3.6-27b-fp8-v1-115959`.
+
+| Job | Node / GPU | Batches |
+|---|---|---|
+| 115959 | `cs003`, A100-PCIE-40GB | `crc2-evolve-c1` generation 10; `crc2-evolve-c2-screen-test` generation 2 |
+| 115990 | `g19`, H100 PCIe 80 GB (queued 18 min) | `crc2-evolve-c1` generations 1–9; `crc2-evolve-c2-screen-test` generation 1 |
+
+| | 27B, A100 (115959) | 27B, H100 (115990) | 7B, A100 (recorded) |
+|---|---|---|---|
+| Start to healthy | 255 s | 315 s: weights 33.5 s, engine init 206.1 s, of which compilation 28.0 s | 115 s (R5) |
+| FP8 | weight-only, through Marlin | native (`FlashInferFp8DeepGEMMDynamicBlockScaledKernel`) | bf16 |
+| GPU memory in use | 34,295 MiB of 40,960 | 70,599 MiB of 81,559 | 35,829 MiB |
+| KV cache | 58,861 tokens | 39.77 GiB, 504,263 tokens: 30.8 requests at 16,384 | 346,928 tokens |
+| A pilot batch (24 prompts) | 527 s (generation 10) | 48–80 s (generations 1–9; median 62) | 18–36 s (generations 1–10) |
+| A c2 test batch (42 prompts) | 363 s (generation 2) | 50 s (generation 1) | 33 and 41 s |
+| Slowest request | 525 s | 80 s | |
+| Requests over the profile's 300 s timeout | 25 of 66 | 0 of 258 | |
+| Peak requests running | 8 (pilot), 10 (c2) | 24 (pilot); 32, the profile's `--max-num-seqs` (c2), so 10 waited | 24 (job 97960, pilot generation 10) |
+| Peak KV cache use | 99–100% | 15–31% | 18.6% |
+| Preemptions | 235 and 114 | 0 | |
+| Prompt tokens served from the prefix cache | 7% and 4% | 32–82% | 63% |
+| Peak generation throughput | 242–297 tokens/s | 811–1,139 tokens/s | 1,297 tokens/s |
+
+All 324 requests returned, with no errors.
+
+**What happened on the A100:**
+- A pilot request holds about 6,900 prompt tokens plus its reply, so the 58,861-token cache ran about 8 at once and the rest queued.
+- vLLM kept preempting running requests to make room. A preempted request's cache is dropped and its prompt computed again later, which also evicted the prompts' shared prefixes.
+
+**What it means for a campaign:**
+- **GPU time is a minor cost.** Evaluation took 46–120 minutes per pilot generation, and the 7B's generation step about 2 minutes (queue, start-up and replies). A slower model that gives better candidates per generation is worth it.
+- **On an H100,** the 27B's generation step would take about 6.5 minutes, with every request far below the 300 s timeout.
+- **On an A100,** it would take about 13–14 minutes, and half of a batch's requests run past 300 s.
+  - OpenEvolve cancels a request at its timeout and sends it again, up to 3 times, 5 s apart, throwing away the partial reply. If all 4 attempts time out, that prompt gives nothing.
+  - So a campaign that runs the 27B on A100s needs a profile whose timeout never fires, for example 1,800 s, and a generation job longer than 30 minutes. That would be a new `-v2` profile, since a profile doesn't change once a run has used it.
+- **Availability:** `gpuqs` has 3 H100s (`g16`, `g18`, `g19`) and 12 working A100s. Generation jobs take either (issue 14).

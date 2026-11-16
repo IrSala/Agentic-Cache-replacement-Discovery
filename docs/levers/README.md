@@ -31,6 +31,7 @@ Run specs (`configs/runs/*.yaml`, `docs/run-specs.md`) make a campaign's parts s
 
 | Lever | Stage | Status | Switch | Class |
 |---|---|---|---|---|
+| [Model](generation/model.md) | generation | replayed 2026-11-15: Qwen3.6-27B against the 7B on 324 recorded prompts. After generation 1, the same compile rate and 16% more distinct programs; in generation 1, mostly copies of the seed | `model:` | changes results |
 | [Longest-first trace order](evaluation/trace-order.md) | evaluation | default since 2026-10-29 | none | result-identical by construction |
 | [Duplicate screen](evaluation/duplicate-screen.md) | evaluation | first HPC3 run 2026-11-13: audits caught 2 false matches (an indexing bug, fixed). Now screens on bzip2 + soplex, tested locally | `evaluator.duplicate_screen`, off by default | result-identical if its trace separates behaviors |
 

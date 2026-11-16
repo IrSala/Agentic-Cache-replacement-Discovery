@@ -64,7 +64,7 @@ CHAMPSIM_LDFLAGS := -static-libstdc++ -static-libgcc
 
 .PHONY: help setup submodules python venvs vcpkg champsim check check-runtime smoke \
         env-record lock clean distclean oe-check oe-check-config oe-toy-manual oe-summary oe-compile-selftest \
-        evaluator-selftest evaluate-selftest baseline-local llm-fetch traces-fetch \
+        evaluator-selftest evaluate-selftest baseline-local llm-fetch llm-replay-selftest llm-replay-check traces-fetch \
         campaign-start campaign-status campaign-stop campaign-resume campaign-report campaign-estimate campaign-diversity campaign-screen campaign-selftest mail-test
 
 help: ## Show this help
@@ -196,6 +196,13 @@ mail-test: ## Test mail delivery to AFAR_MAIL_USER from a CPU node and from Slur
 
 llm-fetch: venvs ## Download a model profile's weights and unpack the vLLM sandbox into AFAR_ASSETS (PROFILE=, LLM_PARTS=; needs internet)
 	$(BUILD_ENV) PROFILE=$(PROFILE) scripts/llm_fetch.sh $(LLM_PARTS)
+
+llm-replay-selftest: venvs ## Self-test the prompt replay: a stand-in model, every funnel step, resume, refused settings (seconds)
+	$(BUILD_ENV) $(RUN_ENV) AFAR_CXX=$$(command -v g++) $(VENV_DIR)/controller/bin/python -m controller.llm_replay --selftest
+
+llm-replay-check: venvs ## Compare a replay's replies (slurm/llm_replay.sbatch) with its source campaigns' (R=<profile>-<jobid> or a directory)
+	@[ -n "$(R)" ] || { echo "usage: make llm-replay-check R=qwen3.6-27b-fp8-v1-<jobid>" >&2; exit 2; }
+	$(BUILD_ENV) $(RUN_ENV) AFAR_CXX=$$(command -v g++) $(VENV_DIR)/controller/bin/python -m controller.llm_replay check $(R)
 
 traces-fetch: venvs ## Download the 19 CRC-2 traces ArchAgent used into AFAR_ASSETS and pin them (~28 GB zip; needs internet)
 	$(RUN_ENV) nice -n 19 $(VENV_DIR)/evaluator/bin/python -I scripts/traces_fetch_crc2.py
