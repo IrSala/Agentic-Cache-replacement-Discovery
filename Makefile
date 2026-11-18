@@ -33,6 +33,8 @@ C          ?=
 NAME       ?=
 EXCLUDE    ?= cs002
 NOW        ?=
+# make campaign-report: SACCT=1 adds Slurm's CPU time and memory per evaluation task (on g17 only).
+SACCT      ?=
 
 CHAMPSIM_DIR    := external/ChampSim
 BASELINE_CONFIG := configs/champsim/baseline.json
@@ -62,8 +64,8 @@ CHAMPSIM_LDFLAGS := -static-libstdc++ -static-libgcc
 
 .PHONY: help setup submodules python venvs vcpkg champsim check check-runtime smoke \
         env-record lock clean distclean oe-check oe-check-config oe-toy-manual oe-summary oe-compile-selftest \
-        evaluator-selftest evaluate-selftest baseline-local llm-fetch traces-fetch \
-        campaign-start campaign-status campaign-stop campaign-resume campaign-selftest mail-test
+        evaluator-selftest evaluate-selftest baseline-local llm-fetch llm-replay-selftest llm-replay-check traces-fetch \
+        campaign-start campaign-status campaign-stop campaign-resume campaign-report campaign-estimate campaign-diversity campaign-screen campaign-selftest mail-test
 
 help: ## Show this help
 	@grep -hE '^[a-z-]+:.*## ' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*## "}; {printf "  %-16s %s\n", $$1, $$2}'
@@ -169,6 +171,21 @@ campaign-stop: venvs ## Halt a campaign after its current stage (C=<id>; NOW=1 c
 campaign-resume: venvs ## Resubmit a campaign's current stage, after a halt or a cancelled job (C=<id>; on g17)
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.campaign resume $(C)
 
+campaign-report: venvs ## What a campaign's jobs did with their CPUs and GPU: per generation and per trace (C=<id>; SACCT=1 on g17)
+	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.report campaign $(C) $(if $(SACCT),--sacct)
+
+campaign-estimate: venvs ## A spec's CPU-hours and time per candidate, per generation and in all, before it runs (SPEC=<name>)
+	@[ -n "$(SPEC)" ] || { echo "usage: make campaign-estimate SPEC=crc2-evolve-c2" >&2; exit 2; }
+	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.report estimate $(SPEC)
+
+campaign-diversity: venvs ## How many different behaviors a campaign found, judged by its per-trace results (C=<id>)
+	@[ -n "$(C)" ] || { echo "usage: make campaign-diversity C=crc2-evolve-c1" >&2; exit 2; }
+	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.diversity $(C)
+
+campaign-screen: venvs ## Replay the duplicate screen on a campaign's records (C=<id>, optional TRACE=<trace>[,<trace>...], CPUS=<n>)
+	@[ -n "$(C)" ] || { echo "usage: make campaign-screen C=crc2-evolve-c1 [TRACE=bzip2_183B,soplex_66B] [CPUS=8]" >&2; exit 2; }
+	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.diversity $(C) --screen $(TRACE) $(if $(CPUS),--cpus $(CPUS))
+
 campaign-selftest: venvs ## The staged pipeline end to end on this host: fake LLM, local executor, injected faults (~2 min)
 	$(RUN_ENV) $(VENV_DIR)/controller/bin/python -m controller.oe_adapter --selftest
 	$(BUILD_ENV) $(RUN_ENV) AFAR_CXX=$$(command -v g++) $(VENV_DIR)/controller/bin/python -m controller.campaign --selftest
@@ -179,6 +196,13 @@ mail-test: ## Test mail delivery to AFAR_MAIL_USER from a CPU node and from Slur
 
 llm-fetch: venvs ## Download a model profile's weights and unpack the vLLM sandbox into AFAR_ASSETS (PROFILE=, LLM_PARTS=; needs internet)
 	$(BUILD_ENV) PROFILE=$(PROFILE) scripts/llm_fetch.sh $(LLM_PARTS)
+
+llm-replay-selftest: venvs ## Self-test the prompt replay: a stand-in model, every funnel step, resume, refused settings (seconds)
+	$(BUILD_ENV) $(RUN_ENV) AFAR_CXX=$$(command -v g++) $(VENV_DIR)/controller/bin/python -m controller.llm_replay --selftest
+
+llm-replay-check: venvs ## Compare a replay's replies (slurm/llm_replay.sbatch) with its source campaigns' (R=<profile>-<jobid> or a directory)
+	@[ -n "$(R)" ] || { echo "usage: make llm-replay-check R=qwen3.6-27b-fp8-v1-<jobid>" >&2; exit 2; }
+	$(BUILD_ENV) $(RUN_ENV) AFAR_CXX=$$(command -v g++) $(VENV_DIR)/controller/bin/python -m controller.llm_replay check $(R)
 
 traces-fetch: venvs ## Download the 19 CRC-2 traces ArchAgent used into AFAR_ASSETS and pin them (~28 GB zip; needs internet)
 	$(RUN_ENV) nice -n 19 $(VENV_DIR)/evaluator/bin/python -I scripts/traces_fetch_crc2.py

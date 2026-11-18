@@ -1,0 +1,26 @@
+# The second campaign on crc2-evolve-v1: the pilot's (crc2-evolve-c1) model, prompt and
+# search, with its CPUs used better (docs/campaigns.md, section 8). A candidate's traces run
+# longest first, so 8 CPUs finish it as soon as 14 did (mcf_46B, the slowest, bounds both):
+# 43% fewer CPU-hours per candidate in a replay of the pilot's 125 completed candidates. The
+# same ~336 CPUs then evaluate 42 candidates a generation instead of 24. Limits come from
+# make campaign-estimate SPEC=crc2-evolve-c2; check it again before a run.
+#     make oe-check SPEC=crc2-evolve-c2
+#     make campaign-start SPEC=crc2-evolve-c2      (on g17, with AFAR_MAIL_USER set)
+spec_version: 1
+description: Second crc2-evolve-v1 campaign, 42 candidates x 8 CPUs a generation (48 h)
+seed: seeds/evolved_repl.h
+model: qwen2.5-coder-7b-v1
+prompt: champsim-rewrite-v1
+search: champsim-rewrite-v1
+evaluator:
+  policy: champsim_ipc
+  experiment: crc2-evolve-v1
+  cpus_per_candidate: 8             # longest trace first; the wall time is still mcf_46B's
+campaign:
+  generations: 60                   # a ceiling; max_wall_hours ends it first
+  candidates_per_generation: 42     # 14 per island with the search profile's 3 islands
+  max_concurrent_tasks: 42          # 42 x 8 = 336 CPUs, the pilot's footprint
+  max_task_retries: 2
+  max_stage_retries: 2
+  max_wall_hours: 48
+  max_cpu_hours: 15000              # about 1.25 x the estimate (12,192 for 51 generations, which errs high)

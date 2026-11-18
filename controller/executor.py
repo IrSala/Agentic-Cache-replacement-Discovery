@@ -2,11 +2,12 @@
 
 Both take the same requests, so a test exercises exactly the jobs a real campaign submits:
     submit(stage, campaign, generation, indices=None, after=None, after_type="afterany", exclude=(),
-           resources={}, begin=None, singleton=False, name=None, mail=False, env={}) -> job id
+           resources={}, begin=None, singleton=False, name=None, mail=False, env={}, hold=False) -> job id
 stage is "generate", "evaluate" (one task per index), "aggregate", "handle" (a stage job's
 failure handler: after_type="afternotok") or "heartbeat" (begin= a later start, singleton=True).
+hold=True submits the job held, until it is released (tests only: a long queue wait).
     mail(name, to) -> job id      a message whose subject is `name`
-plus alive(), job_info(), usage() and cancel() for the jobs they submitted.
+plus alive(), pending(), job_info(), usage() and cancel() for the jobs they submitted.
 
 SlurmExecutor  sbatch --parsable with the stage's script in slurm/campaign_<stage>.sbatch.
                Evaluation is an array (--array=<indices>%K); aggregation waits for
@@ -19,9 +20,11 @@ LocalExecutor  queues the jobs and runs them in order with drain(); a job that r
                is logged and treated like a failed job. An afternotok job runs only if
                the job it waits on failed, and is dropped otherwise, as Slurm does with
                --kill-on-invalid-dep. A begin= job waits until nothing else is queued.
+               A held job waits, still alive, until release().
 """
 
 import collections
+import datetime
 import os
 import re
 import subprocess
@@ -82,7 +85,7 @@ class SlurmExecutor:
             time.sleep(delay)
 
     def submit(self, stage, campaign, generation, *, indices=None, after=None, after_type="afterany", exclude=(),
-               resources=None, begin=None, singleton=False, name=None, mail=False, env=None):
+               resources=None, begin=None, singleton=False, name=None, mail=False, env=None, hold=False):
         logs = self.campaign_dir / "logs"
         logs.mkdir(parents=True, exist_ok=True)
         name = name or f"afar-{stage}-{self.campaign_dir.name}-g{generation}"
@@ -110,6 +113,8 @@ class SlurmExecutor:
             cmd.append(f"--exclude={','.join(sorted(set(exclude)))}")
         if mail and os.environ.get("AFAR_MAIL_USER"):
             cmd += ["--mail-type=FAIL", f"--mail-user={os.environ['AFAR_MAIL_USER']}"]
+        if hold:
+            cmd.append("--hold")
         cmd.append(str(ROOT / SCRIPTS[stage]))
         out = self._run(cmd)
         if out.returncode != 0:
@@ -128,6 +133,20 @@ class SlurmExecutor:
             raise ExecutorError(f"squeue failed ({out.returncode}): {out.stderr.strip()}")
         live = set(out.stdout.split())
         return [j for j in ids if any(x == j or x.startswith(f"{j}_") for x in live)]
+
+    def pending(self, job):
+        """{reason, hours} if job is still waiting to start (Slurm's reason, e.g. Priority), else None."""
+        out = self._run(["squeue", "-h", "-o", "%T|%r|%V", "-j", str(job)],
+                        accept=lambda o: o.returncode == 0 or "Invalid job id" in o.stderr)
+        line = next((l for l in out.stdout.splitlines() if l.strip()), "") if out.returncode == 0 else ""
+        state, reason, submitted = (line.split("|") + ["", "", ""])[:3]
+        if state != "PENDING":
+            return None
+        try:                             # squeue prints the submit time in the controller's local time
+            hours = (datetime.datetime.now() - datetime.datetime.fromisoformat(submitted)).total_seconds() / 3600
+        except ValueError:
+            hours = None
+        return {"reason": reason, "hours": hours}
 
     def job_info(self, job):
         """How a finished job ended: {state, exit_code, node}, from Slurm's accounting."""
@@ -188,20 +207,33 @@ class LocalExecutor:
         self.running = None
         self.fake_usage = (0.0, 0.0)         # what usage() reports, for tests
         self.mails = []                      # the names mail() was asked to send, for tests
+        self.held = {}                       # job id -> its queue entries, until release()
 
     def submit(self, stage, campaign, generation, *, indices=None, after=None, after_type="afterany", exclude=(),
-               resources=None, begin=None, singleton=False, name=None, mail=False, env=None):
+               resources=None, begin=None, singleton=False, name=None, mail=False, env=None, hold=False):
         self.count += 1
         job = f"local-{self.count}"
         self.submitted.append({"job": job, "stage": stage, "generation": generation, "after": after,
                                "after_type": after_type, "exclude": sorted(set(exclude)), "begin": begin,
-                               "singleton": singleton, "name": name, "mail": mail})
-        for index in (indices if indices is not None else [None]):
-            self.queue.append((job, stage, campaign, generation, index, after, after_type, dict(env or {}), bool(begin)))
+                               "singleton": singleton, "name": name, "mail": mail, "hold": hold,
+                               "resources": dict(resources or {})})
+        entries = [(job, stage, campaign, generation, index, after, after_type, dict(env or {}), bool(begin))
+                   for index in (indices if indices is not None else [None])]
+        if hold:
+            self.held[job] = entries
+        else:
+            self.queue.extend(entries)
         return job
 
+    def release(self, job):
+        """Like scontrol release: a held job joins the queue."""
+        self.queue.extend(self.held.pop(job, []))
+
     def alive(self, job_ids):
-        return [j for j in job_ids if j and (j == self.running or any(e[0] == j for e in self.queue))]
+        return [j for j in job_ids if j and (j == self.running or j in self.held or any(e[0] == j for e in self.queue))]
+
+    def pending(self, job):
+        return {"reason": "JobHeldUser", "hours": 0.0} if job in self.held else None
 
     def job_info(self, job):
         return {"state": "FAILED" if self.outcome.get(job) == "failed" else "COMPLETED",
@@ -213,7 +245,8 @@ class LocalExecutor:
     def cancel(self, job_ids):
         """Like scancel: the jobs never run, and count as failed for afternotok."""
         for job in job_ids:
-            if any(e[0] == job for e in self.queue):
+            if job in self.held or any(e[0] == job for e in self.queue):
+                self.held.pop(job, None)
                 self.queue = collections.deque(e for e in self.queue if e[0] != job)
                 self.outcome[job] = "failed"
 
@@ -224,6 +257,8 @@ class LocalExecutor:
     def drop(self, job_ids):
         """Tests only: the jobs vanish without failing, so no handler fires (a stalled chain)."""
         self.queue = collections.deque(e for e in self.queue if e[0] not in job_ids)
+        for job in job_ids:
+            self.held.pop(job, None)
 
     def drain(self):
         idle_beats = 0

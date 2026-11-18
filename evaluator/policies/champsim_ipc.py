@@ -7,7 +7,12 @@ Stages (evaluator/policies/base.py):
                 2. copy the prebuilt base tree (or, without one, a fresh tree),
                    add the candidate through --replacement-dir, and make
   run           every trace, up to ctx.jobs at a time, under prlimit and a
-                process-group timeout, each in its own directory used as HOME
+                process-group timeout, each in its own directory used as HOME.
+                With a duplicate screen (ctx.screen, evaluator/screen.py), the
+                screening traces (one or several) start first; when their results
+                match a behavior in the index, the other traces are stopped or
+                skipped and the candidate gets that behavior's scores (unless it's
+                an audit, which runs every trace anyway)
   score         the manifest's fitness function, against LRU baselines built
                 the same way (and by the same compiler)
 
@@ -16,14 +21,17 @@ with ChampSim's log and JSON in out_dir/raw/. A built-in module (candidate.built
 skips the static checks and the syntax check; that's how baselines are built.
 """
 
+import json
 import math
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from evaluator import champsim_build as cb
 from evaluator import fitness as fitness_mod
 from evaluator import prebuilt, results, static_checks
+from evaluator import screen as screen_mod
 from evaluator.policies.base import Build, InfraError, Outcome, Policy
 from evaluator.policies.compile_only import (COMPILE_TIMEOUT_S, check_infra, compiler_version, preflight_seed,
                                              syntax_check)
@@ -37,10 +45,21 @@ def _tail(text, chars=SUMMARY_CHARS):
     return text if len(text) <= chars else "…" + text[-chars:]
 
 
+def run_order(traces, baselines):
+    """Traces longest first, by their LRU baseline's run time, so ctx.jobs workers pack them as
+    LPT scheduling does: a candidate on fewer CPUs than traces still takes about as long as its
+    slowest trace (8 CPUs for crc2-evolve-v1's 14; docs/campaigns.md section 8). Without baselines
+    (baseline and calibration runs), the manifest's order."""
+    if not baselines:
+        return list(traces)
+    return sorted(traces, key=lambda t: -((baselines.get(t["id"]) or {}).get("run_seconds") or 0.0))
+
+
 class ChampsimIPC(Policy):
     name = "champsim_ipc"
     needs_baselines = True
     needs_simulation = True
+    supports_screen = True
 
     def time_limit_s(self, manifest, cpus):
         """The syntax check, then the build, then the traces in waves of `cpus`."""
@@ -103,13 +122,54 @@ class ChampsimIPC(Policy):
         return Build(status, reason, check_seconds + made.seconds, made.log, ws / "bin" / "champsim", details)
 
     def run(self, candidate, build, ctx):
+        """Every trace, longest first; the records come back in the manifest's order, so the
+        outcome (including which failure is reported first) doesn't depend on the order run.
+        With a screen, its traces start first, longest first, and a match stops the rest (see score)."""
         env = results.environment(build.binary, cb.BASE_CONFIG, self._config_path)
         traces = ctx.manifest["traces"]
+        ordered = run_order(traces, ctx.baselines)
+        self._screen, cancel = None, None
+        if ctx.screen:
+            self._screen_traces = screen_mod.trace_list(ctx.screen["trace"])
+            self._screen_records = {}
+            ordered = ([t for t in ordered if t["id"] in self._screen_traces]
+                       + [t for t in ordered if t["id"] not in self._screen_traces])
+            self._screen = {"trace": ctx.screen["trace"], "matched": None, "matched_generation": None,
+                            "audited": bool(ctx.screen.get("audit")), "stopped_seconds": 0.0}
+            self._screen_lock = threading.Lock()
+            cancel = None if ctx.screen.get("audit") else threading.Event()
         workers = max(1, min(ctx.jobs, len(traces)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
-            return list(pool.map(lambda t: self._run_trace(candidate, build, ctx, t, env), traces))
+            done = dict(zip((t["id"] for t in ordered),
+                            pool.map(lambda t: self._run_trace(candidate, build, ctx, t, env, cancel), ordered)))
+            conflict = self._screen_conflict(done)
+            if conflict:
+                # A trace that ended before it could be stopped disagrees with the matched behavior: the
+                # match was wrong. Run what was stopped or skipped, and score this candidate in full.
+                self._screen["conflict"] = conflict
+                del self._screen["summary"]
+                missing = [t for t in ordered if done[t["id"]] is None]
+                done.update(zip((t["id"] for t in missing),
+                                pool.map(lambda t: self._run_trace(candidate, build, ctx, t, env), missing)))
+        return [done[t["id"]] for t in traces if done[t["id"]] is not None]
+
+    def _screen_conflict(self, done):
+        """The first trace, other than the screening ones, that finished and disagrees with the matched
+        behavior's cycles (or failed), when a screen matched and wasn't an audit; else None."""
+        screen = self._screen
+        if not screen or not screen.get("summary") or screen["audited"]:
+            return None
+        want = screen["summary"].get("cycles") or {}
+        for tid, r in done.items():
+            if (r is not None and tid not in self._screen_traces
+                    and (r["status"] != "completed" or r["cycles"] != want.get(tid))):
+                return tid
+        return None
 
     def score(self, candidate, build, records, ctx):
+        screen = getattr(self, "_screen", None)
+        if screen and screen.get("summary") and not screen["audited"]:
+            return self._screened(build, records)
         by_trace = {r["trace_id"]: r for r in records}
         failed = [r for r in records if r["status"] != "completed"]
         if any(r["status"] == "infra_error" for r in failed):
@@ -130,8 +190,39 @@ class ChampsimIPC(Policy):
         artifacts = {"status": status, "build": build.details}
         if reason:
             artifacts["reason"] = reason
+        if screen:
+            artifacts["screen"] = self._screen_info()
         return Outcome(status=status, fitness=fitness, reason=reason, metrics=metrics,
                        artifacts=artifacts, records=records)
+
+    def _screened(self, build, records):
+        """A match: the matched behavior's scores, with this candidate's own build time. The records
+        are the ones that finished (the screening traces', and any that ended before the match)."""
+        matched = self._screen["summary"]
+        metrics = dict(matched["metrics"])
+        metrics["build_seconds"] = round(build.seconds, 2)
+        return Outcome(status="completed", fitness=matched["fitness"], metrics=metrics, records=records,
+                       artifacts={"status": "completed", "build": build.details, "screen": self._screen_info()})
+
+    def _screen_info(self):
+        info = {k: v for k, v in self._screen.items() if k != "summary"}
+        info["stopped_seconds"] = round(info["stopped_seconds"], 2)
+        return info
+
+    def _check_screen(self, ctx, records, cancel):
+        """After the last screening trace: look their results up, and on a match stop the other traces."""
+        entry = screen_mod.lookup(ctx.screen["index"], records)
+        if not entry:
+            return
+        try:
+            summary = json.loads((Path(ctx.screen["evaluations"]) / entry["candidate"] / "summary.json").read_text())
+        except (OSError, ValueError):
+            return                      # can't reuse it: evaluate in full
+        if summary.get("status") != "completed" or summary.get("screen", {}).get("matched"):
+            return
+        self._screen.update(matched=entry["candidate"], matched_generation=entry.get("generation"), summary=summary)
+        if cancel is not None:
+            cancel.set()
 
     def fail(self, status, reason, candidate, ctx, build=None):
         """An early failure: one record per trace with this status (contract §3)."""
@@ -161,8 +252,11 @@ class ChampsimIPC(Policy):
             results.write_atomic(Path(ctx.out_dir) / f"{record['trace_id']}.json", record)
         return record
 
-    def _run_trace(self, candidate, build, ctx, trace, env):
+    def _run_trace(self, candidate, build, ctx, trace, env, cancel=None):
+        """One trace's record, or None if a screen's match stopped or skipped it."""
         tid = trace["id"]
+        if cancel is not None and cancel.is_set():
+            return None
         raw = Path(ctx.out_dir or ctx.workspace) / "raw"
         raw.mkdir(parents=True, exist_ok=True)
         log_path, json_path = raw / f"{tid}.log", raw / f"{tid}.champsim.json"
@@ -184,8 +278,14 @@ class ChampsimIPC(Policy):
         sim = ctx.manifest["simulation"]
         r = cb.run(build.binary, trace_path, sim["warmup_instructions"], sim["simulation_instructions"],
                    partial, log_path, timeout, run_dir, limits=dict(RUN_LIMITS, cpu_s=timeout + 60),
-                   env=dict(os.environ, HOME=str(run_dir)))
+                   env=dict(os.environ, HOME=str(run_dir)), cancel=cancel)
         finished, seconds = results.now(), round(r.seconds, 2)
+        if r.exit_code is None and cancel is not None and cancel.is_set():
+            partial.unlink(missing_ok=True)
+            log_path.unlink(missing_ok=True)
+            with self._screen_lock:
+                self._screen["stopped_seconds"] += r.seconds
+            return None
 
         if r.exit_code is None:
             status, summary = "timeout", f"the run exceeded run_timeout_s={timeout} and its process group was killed"
@@ -201,9 +301,16 @@ class ChampsimIPC(Policy):
             except (KeyError, IndexError, ValueError, ZeroDivisionError) as e:
                 status, summary = "infra_error", f"unparseable ChampSim JSON after exit 0: {e!r}"
             else:
-                return self._write(ctx, results.make_record(status="completed", metrics=metrics, exit_code=0,
-                                                            run_seconds=seconds, started_at=started,
-                                                            finished_at=finished, **common))
+                record = self._write(ctx, results.make_record(status="completed", metrics=metrics, exit_code=0,
+                                                              run_seconds=seconds, started_at=started,
+                                                              finished_at=finished, **common))
+                if self._screen is not None and tid in self._screen_traces:
+                    with self._screen_lock:
+                        self._screen_records[tid] = record
+                        last = len(self._screen_records) == len(self._screen_traces)
+                    if last:                # every screening trace completed; one that failed means no match
+                        self._check_screen(ctx, [self._screen_records[t] for t in self._screen_traces], cancel)
+                return record
         return self._write(ctx, results.make_record(status=status, error_summary=summary, exit_code=r.exit_code,
                                                     run_seconds=seconds, started_at=started, finished_at=finished,
                                                     **common))

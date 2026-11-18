@@ -72,7 +72,12 @@ CAMPAIGN_DEFAULTS = {"max_concurrent_tasks": 40, "max_task_retries": 2, "max_fai
 HEARTBEAT_FLOOR_MINUTES = {False: 60, True: 10}
 NODE_CPUS = 56                         # HPC3's CPU nodes (docs/sjsu-hpc-workflow.md); a candidate's task fits one
 EVALUATOR_KEYS = {"policy": str, "experiment": str, "openevolve_file": str, "executor": str,
-                  "parallel_candidates": int, "cpus_per_candidate": int, "timeout_s": int, "openevolve": dict}
+                  "parallel_candidates": int, "cpus_per_candidate": int, "timeout_s": int, "openevolve": dict,
+                  "duplicate_screen": dict}
+SCREEN_KEYS = {"trace": object}        # evaluator.duplicate_screen (docs/levers/evaluation/duplicate-screen.md):
+                                       # a trace id or a list of them, checked in screen_problems
+SCREEN_OPTIONAL = {"audit_every": int}
+SCREEN_DEFAULTS = {"audit_every": 10}  # every 10th match still runs every trace; 0 turns audits off
 PROFILE_KEYS = {"prompt": {"description": str, "requires": dict, "openevolve": dict},
                 "search": {"description": str, "openevolve": dict}}
 MODEL_KEYS = ("LLM_SERVER", "MODEL_ID", "MODEL_REVISION", "MODEL_DIR", "CONTEXT_TOKENS", "VLLM_SERVE_ARGS",
@@ -145,6 +150,30 @@ def schema_problems(data, required, optional, where):
     extra = set(data) - set(required) - set(optional)
     if extra:
         found.append(f"{where}: unknown key(s) {', '.join(sorted(extra))}")
+    return found
+
+
+def screen_problems(screen, cls, manifest, campaign):
+    """What's wrong with an evaluator.duplicate_screen setting (evaluator/screen.py)."""
+    where = "evaluator: duplicate_screen"
+    value = screen.get("trace")
+    names = [value] if isinstance(value, str) else value
+    if "trace" in screen and not (isinstance(names, list) and names and all(isinstance(n, str) for n in names)
+                                  and len(set(names)) == len(names)):
+        return [f"{where}: trace must be a trace id or a list of different ones"]
+    found = schema_problems(screen, SCREEN_KEYS, SCREEN_OPTIONAL, where)
+    if found:
+        return found
+    ids = [t["id"] for t in manifest["traces"]]
+    for name in names:
+        if name not in ids:
+            found.append(f"{where}: {name} is not one of {manifest.experiment_id}'s traces")
+    if screen.get("audit_every", 0) < 0:
+        found.append(f"{where}: audit_every must be 0 (no audits) or more")
+    if cls is not None and not cls.supports_screen:
+        found.append(f"{where}: the {cls.name} policy doesn't support it")
+    if not campaign:
+        found.append(f"{where}: works only in a campaign, which records the behaviors earlier generations measured")
     return found
 
 
@@ -380,9 +409,14 @@ def resolve(ref, *, cpus, api_base=None, template_dir="<run>/resolved/prompt"):
                     max_code_length = manifest["limits"]["max_source_bytes"] + CODE_LENGTH_MARGIN
                 evaluator_info = {"policy": ev["policy"], "experiment": manifest.experiment_id,
                                   "manifest": rel(manifest_file), "manifest_sha256": manifest.sha256}
+                if "duplicate_screen" in ev:
+                    found = screen_problems(ev["duplicate_screen"], cls, manifest, campaign)
+                    problems += found
+                    if not found:
+                        evaluator_info["duplicate_screen"] = {**SCREEN_DEFAULTS, **ev["duplicate_screen"]}
         evaluator_file = ROOT / ADAPTER
     else:
-        for key in ("experiment",):
+        for key in ("experiment", "duplicate_screen"):
             if key in ev:
                 problems.append(f"evaluator: {key} applies only to a policy, not openevolve_file")
         evaluator_file = ROOT / ev["openevolve_file"]
@@ -691,6 +725,24 @@ def selftest():
         (tmp / "diff-search.yaml").write_text(diff)
         case("campaign in diff mode", resolved(variant("cd", lambda d: (d.pop("iterations"), d.update(
             campaign=camp, search=str(tmp / "diff-search.yaml"))))), "full rewrites only")
+
+        # The duplicate screen (evaluator.duplicate_screen): a campaign, a supporting policy, a manifest trace.
+        def screened(name, screen, **kw):
+            return variant(name, lambda d: (d.pop("iterations"), d.update(campaign=camp),
+                                            d["evaluator"].update(duplicate_screen=screen)), **kw)
+        gcc = "602.gcc_s-1850B"
+        case("screen with an unsupported policy", resolved(screened("sp", {"trace": gcc})), "doesn't support it")
+        case("screen on a trace not in the manifest", resolved(screened("st", {"trace": "bzip2_183B"})),
+             "is not one of")
+        case("screen with an unknown key", resolved(screened("sk", {"trace": gcc, "every": 3})), "unknown key")
+        case("screen on a list with a repeat", resolved(screened("sr", {"trace": [gcc, gcc]})), "list of different ones")
+        case("screen on an empty list", resolved(screened("se", {"trace": []})), "list of different ones")
+        case("screen on a list with a trace not in the manifest", resolved(screened("sl", {"trace": [gcc, "soplex_66B"]})),
+             "soplex_66B is not one of")
+        case("screen outside a campaign", resolved(variant("sc", lambda d: d["evaluator"].update(
+            duplicate_screen={"trace": gcc}))), "works only in a campaign")
+        case("screen with an OpenEvolve file", resolved(variant("so", lambda d: d["evaluator"].update(
+            duplicate_screen={"trace": gcc}), base="toy-v1")), "applies only to a policy")
 
         # Derived timeout for champsim_ipc comes from the policy's own limits.
         m = Manifest(CONFIGS / "experiments" / "crc2-evolve-v1.json")

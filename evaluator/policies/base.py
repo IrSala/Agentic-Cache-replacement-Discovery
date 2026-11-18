@@ -40,6 +40,7 @@ class Context:
     generation: int = None
     baselines: dict = None          # trace id -> baseline record, for scoring
     seed: Path = None               # the seed header candidates are checked against (None: seeds/evolved_repl.h)
+    screen: dict = None             # the duplicate screen (evaluator/screen.py): trace, index, audit, evaluations
 
 
 @dataclass
@@ -66,6 +67,7 @@ class Policy:
     name = None
     needs_baselines = False         # score() compares against the manifest's LRU baselines
     needs_simulation = False        # runs ChampSim, so it needs the manifest's traces
+    supports_screen = False         # can run a duplicate screen (Context.screen; evaluator/screen.py)
 
     def time_limit_s(self, manifest, cpus):
         """The longest one evaluation can take before the policy's own limits stop it, in seconds.

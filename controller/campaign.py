@@ -40,8 +40,10 @@ knows is in its directory, written atomically, so any stage can be rerun:
 """
 
 import argparse
+import contextlib
 import datetime
 import hashlib
+import io
 import json
 import math
 import os
@@ -59,12 +61,16 @@ from controller import runspec  # noqa: E402
 from controller.executor import ExecutorError, LocalExecutor, SlurmExecutor  # noqa: E402
 from evaluator import evaluate_candidate as ec  # noqa: E402
 from evaluator import results  # noqa: E402
+from evaluator import screen as screen_mod  # noqa: E402
 from evaluator.manifest import Manifest  # noqa: E402
 from evaluator.policies import InfraError, policy_class  # noqa: E402
 
 EXECUTORS = ("slurm", "local")
 LOCAL_EXECUTORS = {}             # campaign directory -> its LocalExecutor, shared by every stage in this process
-GENERATE_RESOURCES = {"partition": "gpuqs", "gres": "gpu:a100:1", "cpus-per-task": 4, "mem": "24G", "time": "00:30:00"}
+# Any GPU vLLM can use: an A100 or an H100 (job 98572), whichever frees first; the pilot's generation 5
+# waited 35.4 h for an A100 alone (docs/status.md, issue 14). gpuqs's P100s are always excluded.
+GENERATE_RESOURCES = {"partition": "gpuqs", "gres": "gpu:1", "cpus-per-task": 4, "mem": "24G", "time": "00:30:00"}
+NO_VLLM_NODES = ("g[1-15]",)     # gpuqs's P100 nodes: compute capability 6.0, below the 8.0 bf16 needs
 AGGREGATE_RESOURCES = {"partition": "cpuqs", "cpus-per-task": 1, "mem": "4G", "time": "00:20:00"}
 HANDLE_RESOURCES = {"partition": "cpuqs", "cpus-per-task": 1, "mem": "1G", "time": "00:10:00"}
 HEARTBEAT_RESOURCES = {"partition": "cpuqs", "cpus-per-task": 1, "mem": "1G", "time": "00:05:00"}
@@ -74,7 +80,9 @@ NAMED_WAIT_S = 60                # a job can start before its submitter records 
 NODE_FAULT_EXIT = "3"            # a generation job's exit status when its node looks unusable (campaign_generate.sbatch)
 # FAULTS (tests only): faults.json = {"infra": [{"generation": g, "index": i, "attempts": [1] or "all"}],
 #     "generate_fail": [{"generation": g, "attempts": [1]}], "aggregate_crash": [g, or {"generation": g, "attempts": [1]}],
-#     "aggregate_crash_after_save": [g, ...]}. attempts count a stage's job restarts (stage_attempt).
+#     "aggregate_crash_after_save": [g, ...], "generate_hold": [g, ...]}. attempts count a stage's job
+#     restarts (stage_attempt). generate_hold submits generation g's job held, as if it waited for a GPU
+#     until released (scontrol release <job>).
 
 
 class CampaignError(RuntimeError):
@@ -175,7 +183,9 @@ class Campaign:
                      "handle": HANDLE_RESOURCES}.get(stage) or self.evaluate_resources()
         exclude = set(kwargs.pop("exclude", ()))
         if stage == "generate":
-            exclude |= set(self.meta.get("exclude", []))
+            exclude |= set(self.meta.get("exclude", [])) | set(NO_VLLM_NODES)
+            if g in self.faults().get("generate_hold", []):
+                kwargs["hold"] = True
         job = self.executor().submit(stage, str(self.path), g, resources=resources, exclude=sorted(exclude), **kwargs)
         self.event("submitted", stage=stage, generation=g, job_id=job, exclude=sorted(exclude),
                    indices=kwargs.get("indices"), after=kwargs.get("after"))
@@ -293,13 +303,21 @@ def generate(c, g, api_base=None, needs_llm=False, job=None):
         return int(fault["exit"])
     if fault:
         raise CampaignError(f"injected by faults.json: the generation job of generation {g} failed")
+    # A job that waited in the queue past max_wall_hours ends the campaign instead of generating (issue 15).
+    late = current and not done and wall_time_up(c)
     if needs_llm:                                  # does the job need to start the model server?
-        return 0 if current and not done and not c.stopped() else 1
+        return 0 if current and not done and not c.stopped() and not late else 1
     if not current:
         print(f"generation {g} is not the current stage ({st['state']}, {st['stage']} {st['generation']}); nothing to do")
         return 0
     if c.stopped():
         c.halt("stopped", f"STOP file found before generating generation {g}")
+        return 0
+    if late:
+        summary = read_json(c.gen_dir(g - 1) / "summary.json", {"best_overall": None})
+        finish(c, g - 1, summary, "wall_time", (f"{wall_hours(c):.1f} h, the max_wall_hours of {c.param('max_wall_hours')}, "
+                                                f"when generation {g}'s job started, so it wasn't generated; "
+                                                f"best combined_score {summary['best_overall']}"))
         return 0
     if not done:
         if not api_base:
@@ -342,11 +360,12 @@ def generate(c, g, api_base=None, needs_llm=False, job=None):
                     tasks.append(cand)
             entries.append(entry)
         results.write_atomic(gd / "tasks.json", tasks)
+        gpu = os.environ.get("AFAR_GPU_NAME")     # set by campaign_generate.sbatch, so LLM times compare by GPU
         results.write_atomic(gd / "generation.json", {"generation": g, "llm_seconds": llm_seconds,
-                                                      "host": socket.gethostname(), "entries": entries})
+                                                      "host": socket.gethostname(), "gpu": gpu, "entries": entries})
         rejected = sum("rejected" in e for e in entries)
         c.event("generated", generation=g, candidates=len(entries), unique=len(tasks), rejected=rejected,
-                llm_seconds=llm_seconds)
+                llm_seconds=llm_seconds, gpu=gpu)
         print(f"generation {g}: {len(entries)} replies in {llm_seconds}s, {len(tasks)} unique candidates, "
               f"{rejected} rejected")
     tasks = read_json(gd / "tasks.json")
@@ -383,12 +402,19 @@ def evaluate_task(c, g, index):
     manifest = c.manifest()
     root = ec.results_root()
     candidate = ec.candidate_from_text((gd / "candidates" / f"{cand}.h").read_text())
+    evals = root / "evaluations" / manifest.experiment_id / ev["policy"]
+    screen = None
+    if ev.get("duplicate_screen"):
+        ds = ev["duplicate_screen"]
+        known = read_json(c.gen_dir(g - 1) / SCREEN_INDEX, {}) if g > 0 else {}
+        screen = {"trace": ds["trace"], "index": known.get("behaviors", {}), "evaluations": str(evals),
+                  "audit": ds["audit_every"] > 0 and int(cand, 16) % ds["audit_every"] == 0}
     try:
         summary = ec.evaluate(
-            manifest, candidate, out_dir=root / "evaluations" / manifest.experiment_id / ev["policy"] / cand,
+            manifest, candidate, out_dir=evals / cand,
             baseline_dir=root / "baselines" / manifest.experiment_id, policy=ev["policy"], campaign_id=c.id,
             generation=g, cxx=os.environ.get("AFAR_CXX", "g++"), jobs=ev["cpus_per_candidate"],
-            seed=ROOT / c.meta["seed"]["path"])
+            seed=ROOT / c.meta["seed"]["path"], screen=screen)
     except InfraError as e:
         return infra(str(e))
     if summary["status"] == "infra_error":
@@ -462,6 +488,8 @@ def aggregate(c, g, job=None):
         if g in c.faults().get("aggregate_crash_after_save", []):
             raise CampaignError("injected by faults.json: aggregate crashed after saving")
         c.event("aggregated", generation=g, programs_added=added)
+    if c.meta["evaluator"].get("duplicate_screen"):
+        update_screen_index(c, g)
     summary = summarize(c, g)
     results.write_atomic(gd / "summary.json", summary)
 
@@ -498,17 +526,26 @@ def record_usage(c):
     return cpu, gpu
 
 
+def wall_hours(c, end=None):
+    """Hours from the campaign's start to `end` (now by default)."""
+    end = end or datetime.datetime.now(datetime.timezone.utc)
+    return (end - datetime.datetime.fromisoformat(c.meta["created_at"])).total_seconds() / 3600
+
+
+def wall_time_up(c):
+    return bool(c.param("max_wall_hours")) and wall_hours(c) >= c.param("max_wall_hours")
+
+
 def limit_reached(c, g, summary):
     """("finished" or "halted", reason, message) if a stop condition holds after generation g, else None.
-    Checked once per generation, so a limit can be overshot by up to one generation."""
+    Checked once per generation, so a limit can be overshot by up to one generation; the wall time is
+    checked again when the next generation's job starts (generate)."""
     best = summary["best_overall"]
     target = c.param("target_fitness")
     if target is not None and best is not None and best >= target:
         return "finished", "target", f"best combined_score {best} reached target_fitness {target} after generation {g}"
-    hours = (datetime.datetime.now(datetime.timezone.utc)
-             - datetime.datetime.fromisoformat(c.meta["created_at"])).total_seconds() / 3600
-    if c.param("max_wall_hours") and hours >= c.param("max_wall_hours"):
-        return "finished", "wall_time", (f"{hours:.1f} h, the max_wall_hours of {c.param('max_wall_hours')}, "
+    if wall_time_up(c):
+        return "finished", "wall_time", (f"{wall_hours(c):.1f} h, the max_wall_hours of {c.param('max_wall_hours')}, "
                                          f"after generation {g}; best combined_score {best}")
     try:
         cpu, gpu = record_usage(c)
@@ -533,6 +570,62 @@ def limit_reached(c, g, summary):
     return None
 
 
+SCREEN_INDEX = "screen-index.json"
+
+
+def update_screen_index(c, g):
+    """The duplicate screen's behaviors after generation g (generations/<g>/screen-index.json): g-1's index
+    plus g's fully evaluated behaviors (evaluator/screen.py). Generation g+1's tasks read it. A full evaluation
+    that matched a known behavior (an audit, or a conflict found while screening) and differs from it is a
+    false match: it's logged once, and its key becomes ambiguous through the merge.
+
+    Cached results are indexed too: one scored by another campaign (such as the seed) is new to this index,
+    and one this campaign scored earlier merges as the same behavior. They're left out of the counts and the
+    false-match check, which belong to the generation that evaluated them. `audited` counts audits of
+    matches: candidates that matched a behavior and ran every trace anyway."""
+    path = c.gen_dir(g) / SCREEN_INDEX
+    rerun = path.exists()
+    ds = c.meta["evaluator"]["duplicate_screen"]
+    manifest = c.manifest()
+    traces = [t["id"] for t in manifest["traces"]]
+    evals = ec.results_root() / "evaluations" / manifest.experiment_id / c.meta["evaluator"]["policy"]
+    index = dict(read_json(c.gen_dir(g - 1) / SCREEN_INDEX, {}).get("behaviors", {})) if g > 0 else {}
+    found, false, counts = {}, [], {"screened": 0, "audited": 0, "conflicts": 0}
+    gd = c.gen_dir(g)
+    for cand in dict.fromkeys(read_json(gd / "tasks.json", [])):
+        s = (read_json(gd / "results" / f"{cand}.json", {}) or {}).get("summary")
+        if not s:
+            continue
+        cached = s.get("cached")        # counted and checked where it was evaluated
+        info = s.get("screen") or {}
+        if ec.screened(s):
+            counts["screened"] += not cached
+            continue
+        if not cached:
+            counts["audited"] += bool(info.get("audited") and info.get("matched"))
+            counts["conflicts"] += bool(info.get("conflict"))
+        cycles = s.get("cycles") or {}
+        if info.get("matched") and not cached:
+            want = (read_json(evals / info["matched"] / "summary.json", {}) or {}).get("cycles") or {}
+            if s["status"] != "completed" or any(cycles.get(t) != want.get(t) for t in traces):
+                false.append({"candidate": cand, "matched": info["matched"], "status": s["status"],
+                              "traces": [t for t in traces if cycles.get(t) != want.get(t)]})
+        if s["status"] != "completed":
+            continue
+        k = screen_mod.key([read_json(evals / cand / f"{t}.json", {}) or {} for t in screen_mod.trace_list(ds["trace"])])
+        if k:
+            vector = tuple(cycles[t] for t in traces)
+            found.setdefault(k, {})[vector] = {"candidate": cand, "generation": g, "cycles": list(vector)}
+    screen_mod.merge(index, found)
+    results.write_atomic(path, {"trace": ds["trace"], "generation": g, "behaviors": index,
+                                "ambiguous": sum(v == screen_mod.AMBIGUOUS for v in index.values()),
+                                **counts, "false_matches": false})
+    if not rerun:
+        for f in false:
+            c.event("screen_false_match", generation=g, trace=ds["trace"], **f)
+    return index
+
+
 def summarize(c, g):
     gd = c.gen_dir(g)
     entries = read_json(gd / "generation.json")["entries"]
@@ -546,10 +639,16 @@ def summarize(c, g):
             key = "rejected: " + e["rejected"].split(" (")[0]
             statuses[key] = statuses.get(key, 0) + 1
     best = read_json(c.checkpoint(g) / "best_program_info.json", {})
-    return {"generation": g, "iterations": [entries[0]["iteration"], entries[-1]["iteration"]],
-            "statuses": statuses, "best_of_generation": max(fitness, default=None),
-            "best_overall": best.get("metrics", {}).get("combined_score"), "best_id": best.get("id"),
-            "unique_candidates": len(read_json(gd / "tasks.json")), "at": now()}
+    out = {"generation": g, "iterations": [entries[0]["iteration"], entries[-1]["iteration"]],
+           "statuses": statuses, "best_of_generation": max(fitness, default=None),
+           "best_overall": best.get("metrics", {}).get("combined_score"), "best_id": best.get("id"),
+           "unique_candidates": len(read_json(gd / "tasks.json")), "at": now()}
+    idx = read_json(gd / SCREEN_INDEX, None)
+    if idx:
+        out["screen"] = {k: idx[k] for k in ("screened", "audited", "conflicts", "ambiguous")}
+        out["screen"].update(false_matches=len(idx["false_matches"]),
+                             behaviors=sum(v != screen_mod.AMBIGUOUS for v in idx["behaviors"].values()))
+    return out
 
 
 def run_stage(stage, campaign, g, index, job=None, env=None):
@@ -663,6 +762,17 @@ def heartbeat(c, job=None):
     c.submit_heartbeat()                 # first, so a check that fails can't end the chain
     stage_job, handler_job = c.stage_jobs()
     live = c.executor().alive([stage_job, handler_job])
+    # Why a queued stage job waits, for campaign-status (issue 14), which reads files only: squeue
+    # takes 18 s to fail on coe-hpc1. An aggregation waiting on its array (Dependency) is expected.
+    waiting = None
+    if stage_job in live:
+        try:
+            wait = c.executor().pending(stage_job)
+        except ExecutorError as e:
+            wait = None
+            print(f"heartbeat {job}: could not read job {stage_job}'s queue state: {e}", file=sys.stderr)
+        if wait and wait["reason"] != "Dependency":
+            waiting = {"job": stage_job, **wait}
     age = (datetime.datetime.now(datetime.timezone.utc)
            - datetime.datetime.fromisoformat(st["updated_at"])).total_seconds()
     action = "ok"
@@ -681,8 +791,10 @@ def heartbeat(c, job=None):
                     handler_job=handler_job, minutes=round(age / 60))
             restart_stage(c)
             action = "restarted"
-    results.write_atomic(path, {**read_json(path, {}), "last_run": now(), "last_job": job, "last_action": action})
-    print(f"heartbeat {job}: {action} ({st['stage']} {st['generation']}, live jobs {live})")
+    results.write_atomic(path, {**read_json(path, {}), "last_run": now(), "last_job": job, "last_action": action,
+                                "waiting": waiting})
+    print(f"heartbeat {job}: {action} ({st['stage']} {st['generation']}, live jobs {live})"
+          + (f"; job {stage_job} pending ({waiting['reason']})" if waiting else ""))
     return 0
 
 
@@ -739,9 +851,11 @@ def show_status(c):
     elif hb:
         print(f"  heartbeat: every {c.param('heartbeat_minutes')} min; last ran {hb.get('last_run', 'not yet')}"
               f" ({hb.get('last_action', '-')}); next job {hb.get('next')}")
-    end = datetime.datetime.now(datetime.timezone.utc) if st["state"] == "running" \
-        else datetime.datetime.fromisoformat(st["updated_at"])
-    hours = (end - datetime.datetime.fromisoformat(c.meta["created_at"])).total_seconds() / 3600
+        wait = hb.get("waiting")
+        if wait and st["state"] == "running" and wait["job"] == c.stage_jobs()[0]:
+            print(f"  waiting: job {wait['job']} was pending" + (f" {wait['hours']:.1f} h" if wait["hours"] is not None
+                                                                else "") + f" ({wait['reason']}) at the last heartbeat")
+    hours = wall_hours(c, None if st["state"] == "running" else datetime.datetime.fromisoformat(st["updated_at"]))
     used = [f"{hours:.1f} h" + (f" of max_wall_hours {c.param('max_wall_hours')}" if c.param("max_wall_hours") else "")]
     budget = read_json(c.path / "budget.json")
     if budget:
@@ -826,7 +940,7 @@ def selftest(keep=False):
         print(f"  {'ok  ' if ok else 'FAIL'}  {name:<52} {detail}")
 
     saved = {k: os.environ.get(k) for k in ("AFAR_RESULTS", "AFAR_LLM_API_BASE", "AFAR_LLM_API_KEY", "AFAR_MAIL_USER",
-                                            "PATH", "FAKE_SBATCH_FAIL", "FAKE_SBATCH_REJECT")}
+                                            "PATH", "FAKE_SBATCH_FAIL", "FAKE_SBATCH_REJECT", "FAKE_SQUEUE_OUT")}
     saved_globals = (NAMED_WAIT_S, STALL_GRACE_S, free_gb, SlurmExecutor.retry_delays)
     NAMED_WAIT_S = STALL_GRACE_S = 0     # local jobs start when named, and a local run can't wait 10 min
     tmp = Path(tempfile.mkdtemp(prefix="afar-campaign-selftest-"))
@@ -920,6 +1034,181 @@ def selftest(keep=False):
         s = read_json(c.gen_dir(3) / "summary.json")
         check("statuses vary across candidates", len(s["statuses"]) >= 2, str(s["statuses"]))
 
+        # (efficiency) traces run longest first, by their baseline's run time, and the outcome doesn't
+        # depend on it; the cost report and estimator (controller/report.py) read this campaign and spec.
+        from controller import report
+        from evaluator.policies.champsim_ipc import run_order
+        ts = [{"id": "a"}, {"id": "b"}, {"id": "c"}]
+        by_time = {"a": {"run_seconds": 1.0}, "b": {"run_seconds": 3.0}, "c": {"run_seconds": 2.0}}
+        check("(efficiency) run_order: longest baseline first, else the manifest's",
+              [t["id"] for t in run_order(ts, by_time)] == ["b", "c", "a"] and [t["id"] for t in run_order(ts, None)] == ["a", "b", "c"])
+        mru = ec.candidate_from_text(replies["2-mru"])
+        runs = [ec.evaluate(manifest, mru, out_dir=tmp / f"jobs-{j}", baseline_dir=tmp / "results" / "baselines" / manifest.experiment_id,
+                            cxx=os.environ.get("AFAR_CXX", "g++"), jobs=j) for j in (2, 4)]
+        check("(efficiency) on 2 or 4 CPUs: identical cycles and fitness", runs[0]["status"] == "completed"
+              and runs[0]["cycles"] == runs[1]["cycles"] and runs[0]["fitness"] == runs[1]["fitness"],
+              f"{runs[0]['status']}, fitness {runs[0]['fitness']}")
+        rep = report.campaign_report(c)
+        files = sum(1 for g in range(4) for f in (c.gen_dir(g) / "results").glob("*.json") if ".infra-" not in f.name)
+        check("(efficiency) campaign-report: every generation, evaluation and trace",
+              [r["generation"] for r in rep["generations"]] == [0, 1, 2, 3] and rep["evaluations"] + rep["cached"] == files
+              and len(rep["traces"]) == len(manifest["traces"]),
+              f"{rep['evaluations']} evaluated, {rep['cached']} cached, {len(rep['traces'])} traces")
+        est = report.estimate(spec_path)
+        warned = report.estimate(variant("over-budget", max_wall_hours=1000, max_cpu_hours=1e-9))
+        check("(efficiency) campaign-estimate, and its budget warning", est["generations"] == 3
+              and est["candidate_minutes"] > 0 and not est["warnings"]
+              and any("max_cpu_hours" in w for w in warned["warnings"]), (warned["warnings"] or ["no warning"])[0][:60])
+
+        # (diversity) behaviors from per-trace results (controller/diversity.py): identical cycle vectors are
+        # one behavior; 0.05% apart is another unless the threshold is 0.1%; and this campaign's candidates
+        # group the same way by cycles and by LLC misses.
+        from controller import diversity as dv
+        va, vb, vc = (100000, 200000), (100050, 200000), (110000, 200000)
+        check("(diversity) thresholds: 0.05% apart is distinct at 0.01%, merged at 0.1%",
+              len(dv.complete_linkage([va, vb, vc], 0.0001)) == 3 and len(dv.complete_linkage([va, vb, vc], 0.001)) == 2)
+        check("(diversity) Hill and Vendi: two equal, distant behaviors count 2; one behavior counts 1",
+              round(dv.hill([5, 5], 1), 6) == 2 and dv.hill([9, 1], 2) < 1.25
+              and round(dv.vendi([va, vc], [3, 3], 0.001), 6) == 2 and round(dv.vendi([va], [4], 0.001), 6) == 1)
+        div = dv.diversity(c)
+        d = div["diversity"]
+        check("(diversity) campaign-diversity: behaviors per generation; misses group as cycles do",
+              0 < d["behaviors"] <= d["candidates"] and [r["generation"] for r in div["generations"]] == [0, 1, 2, 3]
+              and div["cross_check"]["agree"] and div["separation"] is not None,
+              f"{d['candidates']} candidates, {d['behaviors']} behaviors, {div['cross_check']['candidates']} with miss data")
+
+        # (screen) the duplicate screen replayed (diversity.screen_rows): a candidate matches only behaviors that
+        # earlier generations completed; a screening result two behaviors share is ambiguous and never screened;
+        # a match that differs elsewhere is a wrong match; a match frees its CPUs once the screening trace ends.
+        def rec(cycles, misses, run_s, status="completed"):
+            return {"status": status, "cycles": cycles, "misses": misses, "run_s": run_s}
+        A = {"s": rec(10, 1, 10), "x": rec(100, 5, 100)}
+        A2 = {"s": rec(10, 1, 10), "x": rec(100, 5, 100)}
+        B = {"s": rec(10, 1, 10), "x": rec(101, 5, 100)}               # same on s, different on x
+        F = {"s": rec(10, 1, 10), "x": rec(None, None, 50, "timeout")}  # same on s, failed on x
+        C = {"s": rec(20, 2, 10), "x": rec(100, 5, 100)}
+        gens = [(0, [("a", A), ("c", C)]), (1, [("a2", A2), ("b", B), ("f", F)]), (2, [("a3", A2)])]
+        r = dv.screen_rows(gens, ["s", "x"], ["x", "s"], "s", 2)
+        same_gen = dv.screen_rows([(0, [("a", A), ("a2", A2)])], ["s", "x"], ["x", "s"], "s", 2)
+        both = dv.screen_rows([(0, [("a", A)]), (1, [("b", B)]), (2, [("a2", A2)])], ["s", "x"], ["x", "s"], "s", 2)
+        check("(screen) replay: matches, wrong matches, and CPUs freed",
+              r["matches"] == 3 and r["wrong"] == 2 and r["ambiguous"] == 1 and {w["why"] for w in r["wrong_matches"]}
+              == {"differs on another trace", "failed on another trace"} and r["held_freed_cpu_hours"] > 0,
+              f"{r['matches']} matches, {r['wrong']} wrong")
+        check("(screen) replay: no match within a generation; a shared screening result becomes ambiguous",
+              same_gen["matches"] == 0 and both["wrong"] == 1 and both["ambiguous"] == 1
+              and dv.screen_rows([(0, [("a", A), ("b", B)]), (1, [("a2", A2)])], ["s", "x"], ["x", "s"], "s", 2)
+              ["ambiguous"] == 1)
+        # Two screening traces: a behavior that ties on s but not on t isn't matched, and the match is known
+        # when the longer of them ends. On 2 CPUs: t 0-1440 s, s 0-360, then x 360-3960; in full 3600.
+        A = {"s": rec(10, 1, 360), "t": rec(30, 3, 1440), "x": rec(100, 5, 3600)}
+        B = {"s": rec(10, 1, 360), "t": rec(31, 3, 1440), "x": rec(100, 5, 3600)}
+        gens = [(0, [("a", A)]), (1, [("b", B), ("a2", dict(A))])]
+        one = dv.screen_rows(gens, ["s", "t", "x"], ["x", "t", "s"], "s", 2)
+        two = dv.screen_rows(gens, ["s", "t", "x"], ["x", "t", "s"], ["s", "t"], 2)
+        check("(screen) replay on two traces: fewer wrong matches, timed by the longer one",
+              (one["matches"], one["wrong"]) == (2, 1) and (two["matches"], two["wrong"]) == (1, 0)
+              and (two["skipped_cpu_hours"], two["stopped_cpu_hours"], two["held_freed_cpu_hours"],
+                   two["held_added_cpu_hours"]) == (1.0, 0.3, 1.2, 0.4),
+              f"one trace {one['matches']} matches, {one['wrong']} wrong; two {two['matches']}, {two['wrong']}; "
+              f"skipped {two['skipped_cpu_hours']}, before the match {two['stopped_cpu_hours']}, freed "
+              f"{two['held_freed_cpu_hours']}, added {two['held_added_cpu_hours']}")
+        rep = dv.screen_replay(c)
+        check("(screen) campaign-screen: every trace replayed on this campaign",
+              len(rep["per_trace"]) == len(c.manifest()["traces"])
+              and all(t["matches"] <= t["candidates"] for t in rep["per_trace"]),
+              f"{len(rep['per_trace'])} traces, detail {(rep['detail'] or {}).get('trace')}")
+
+        # (screen) the same campaign with the duplicate screen on, its evaluations fresh so nothing is reused
+        # from campaign a. At 10K instructions every policy behaves as LRU does, so the MRU variant matches
+        # the seed's behavior. Every candidate must get the scores campaign a gave it, and some are screened.
+        evals_root = tmp / "results" / "evaluations" / manifest.experiment_id
+        aside = evals_root.with_name(manifest.experiment_id + ".screen-off")
+        evals_root.rename(aside)
+        try:
+            data = json.loads(json.dumps(spec))
+            data["evaluator"]["duplicate_screen"] = {"trace": ["bzip2_183B", "soplex_66B"], "audit_every": 0}
+            (tmp / "campaign-screen.yaml").write_text(yaml.safe_dump(data))
+            cs = start(tmp / "campaign-screen.yaml", name="selftest-screen", executor="local")
+            drain_local(cs)
+
+            def outcomes(camp):
+                found = {}
+                for g in range(4):
+                    for f in (camp.gen_dir(g) / "results").glob("*.json"):
+                        if ".infra-" not in f.name:
+                            r = read_json(f)
+                            found[r["candidate_id"]] = r["summary"]
+                return found
+            on, off = outcomes(cs), outcomes(c)
+            common = sorted(set(on) & set(off))
+            screened = [k for k, v in on.items() if ec.screened(v)]
+            check("(screen) a screened campaign finishes with every score unchanged", cs.status["state"] == "finished"
+                  and common and all(on[k]["fitness"] == off[k]["fitness"] and on[k]["speedups"] == off[k]["speedups"]
+                                     for k in common) and screened,
+                  f"{len(common)} candidates in both, {len(screened)} screened")
+            idx = read_json(cs.gen_dir(3) / SCREEN_INDEX, {})
+            evals_on = tmp / "results" / "evaluations" / manifest.experiment_id / cs.meta["evaluator"]["policy"]
+            ids = [t["id"] for t in manifest["traces"]]
+            fp = dv.fingerprint(evals_on, screened[0], ids) if screened else None
+            report_on = report.campaign_report(cs)
+            check("(screen) the index, the generation summaries, diversity and the report know it",
+                  idx.get("trace") == ["bzip2_183B", "soplex_66B"] and idx.get("behaviors") and not idx.get("false_matches")
+                  and all(on[k]["screen"]["trace"] == ["bzip2_183B", "soplex_66B"]
+                          and {"bzip2_183B", "soplex_66B"} <= set(on[k]["traces"]) for k in screened)
+                  and sum(read_json(cs.gen_dir(g) / "summary.json")["screen"]["screened"] for g in range(4)) == len(screened)
+                  and fp is not None and fp.get("screened_from") and report_on["screened"] == len(screened),
+                  f"{len(idx.get('behaviors', {}))} key(s), report {report_on['screened']} screened")
+
+            # A full evaluation that matched a behavior and differs from it is a false match: logged once,
+            # and its key becomes ambiguous. Made here by turning a screened result into an audit that disagrees.
+            where = [(g, k) for g in range(1, 4) for k in read_json(cs.gen_dir(g) / "tasks.json", [])
+                     if k in screened and not (read_json(cs.gen_dir(g) / "results" / f"{k}.json", {}) or {})
+                     .get("summary", {}).get("cached")]
+            if not where:
+                check("(screen) a false match is caught", False, "no screened candidate to alter")
+            else:
+                g, cand = where[0]
+                rpath = cs.gen_dir(g) / "results" / f"{cand}.json"
+                r = read_json(rpath)
+                want = read_json(evals_on / r["summary"]["screen"]["matched"] / "summary.json")["cycles"]
+                r["summary"]["screen"] = {**r["summary"]["screen"], "audited": True}
+                r["summary"]["cycles"] = {**want, ids[-1]: want[ids[-1]] + 1}
+                results.write_atomic(rpath, r)
+                # Beside it, a candidate chosen for audit that matched nothing: not an audit of a match.
+                idle = "0" * 16
+                results.write_atomic(cs.gen_dir(g) / "results" / f"{idle}.json", {"candidate_id": idle, "summary": {
+                    "status": "compile_failed", "screen": {"trace": "bzip2_183B", "matched": None, "audited": True}}})
+                results.write_atomic(cs.gen_dir(g) / "tasks.json", read_json(cs.gen_dir(g) / "tasks.json") + [idle])
+                (cs.gen_dir(g) / SCREEN_INDEX).unlink()
+                update_screen_index(cs, g)
+                again = read_json(cs.gen_dir(g) / SCREEN_INDEX)
+                logged = [e for e in read_events(cs) if e["event"] == "screen_false_match"]
+                check("(screen) a false match is caught", len(again["false_matches"]) == 1 and again["ambiguous"] == 1
+                      and len(logged) == 1 and logged[0]["candidate"] == cand and logged[0]["traces"] == [ids[-1]],
+                      f"{len(again['false_matches'])} false match, {again['ambiguous']} ambiguous key(s)")
+                check("(screen) only audits of a match count as audits", again["audited"] == 1,
+                      f"{again['audited']} audit(s)")
+
+            # A result another campaign scored is a known behavior too (crc2-evolve-c2-screen-test's seed,
+            # cached from crc2-evolve-c1, was left out until 2026-11-13). Here the seed's result is marked cached.
+            seed_id = read_json(cs.gen_dir(0) / "tasks.json")[0]
+            before = read_json(cs.gen_dir(0) / SCREEN_INDEX)
+            rpath = cs.gen_dir(0) / "results" / f"{seed_id}.json"
+            r = read_json(rpath)
+            r["summary"]["cached"] = True
+            results.write_atomic(rpath, r)
+            (cs.gen_dir(0) / SCREEN_INDEX).unlink()
+            update_screen_index(cs, 0)
+            after = read_json(cs.gen_dir(0) / SCREEN_INDEX)
+            check("(screen) a seed scored by another campaign is a known behavior",
+                  after["behaviors"] and after["behaviors"] == before["behaviors"] and not after["false_matches"]
+                  and not any(after[k] for k in ("screened", "audited", "conflicts")),
+                  f"{len(after['behaviors'])} behavior(s) after generation 0")
+        finally:
+            shutil.rmtree(evals_root, ignore_errors=True)
+            aside.rename(evals_root)
+
         # (c) a persistent failure halts with a clear status.
         c2 = start(spec_path, name="selftest-c", executor="local")
         (c2.path / "faults.json").write_text(json.dumps({"infra": [{"generation": 0, "index": 0, "attempts": "all"}]}))
@@ -952,8 +1241,12 @@ def selftest(keep=False):
         fails = [e for e in events if e["event"] == "stage_failed"]
         jobs = [e for e in events if e["event"] == "submitted" and e["stage"] == "generate"]
         check("(M6 a) a failed generation job is restarted", cg.status["state"] == "finished" and len(fails) == 2
-              and len(jobs) == 3 and [j["exclude"] for j in jobs] == [[], [], ["localhost"]],
+              and len(jobs) == 3 and [j["exclude"] for j in jobs] == [["g[1-15]"], ["g[1-15]"], ["g[1-15]", "localhost"]],
               f"{len(fails)} failure(s), excludes {[j['exclude'] for j in jobs]}")
+        gen_jobs = [s for s in cg.executor().submitted if s["stage"] == "generate"]
+        check("(issue 14) generation jobs take any GPU, never a P100", gen_jobs and all(
+            s["resources"].get("gres") == "gpu:1" and "g[1-15]" in s["exclude"] for s in gen_jobs),
+              f"{gen_jobs[0]['resources'].get('gres')}, excludes {gen_jobs[0]['exclude']}" if gen_jobs else "none")
 
         # (M6 c) the stage job and its handler vanish without failing: only the heartbeat can notice.
         cs = start(variant("s", generations=1), name="selftest-s", executor="local")
@@ -989,7 +1282,7 @@ def selftest(keep=False):
             'if (( n <= ${FAKE_SBATCH_FAIL:-0} )); then\n'
             '    echo "sbatch: error: Batch job submission failed: Socket timed out on send/recv operation" >&2; exit 1\nfi\n'
             'echo $(( 7000 + n ))\n')
-        (fake / "squeue").write_text("#!/bin/bash\nexit 0\n")
+        (fake / "squeue").write_text('#!/bin/bash\n[[ -n "${FAKE_SQUEUE_OUT:-}" ]] && echo "$FAKE_SQUEUE_OUT"\nexit 0\n')
         for f in ("sbatch", "squeue"):
             (fake / f).chmod(0o755)
         os.environ.update(PATH=f"{fake}:{saved['PATH']}", FAKE_SBATCH_FAIL="2")
@@ -1017,6 +1310,40 @@ def selftest(keep=False):
         except ExecutorError:
             rejected = True
         check("(M6 d) a rejected sbatch is not retried", rejected and int((fake / "count").read_text()) == 8)
+        os.environ.pop("FAKE_SBATCH_REJECT")
+
+        # (issues 14, 15) a generation job's Slurm request: any GPU but a P100, held when a test asks.
+        (cz.path / "faults.json").write_text(json.dumps({"generate_hold": [1]}))
+        cz.submit_generation(1)
+        gen = next((s for s in (fake / "sbatch.log").read_text().splitlines() if "campaign_generate.sbatch" in s), "")
+        check("(issue 14) the generation job's Slurm flags", all(x in gen for x in (
+            "--partition=gpuqs", "--gres=gpu:1", "--exclude=g[1-15]", "--hold")) and "a100" not in gen, gen[-90:])
+        # (issue 14) why a queued job waits, from squeue; nothing for a running job.
+        submitted = datetime.datetime.now() - datetime.timedelta(hours=2)
+        os.environ["FAKE_SQUEUE_OUT"] = f"PENDING|Priority|{submitted.isoformat(timespec='seconds')}"
+        wait = SlurmExecutor(cz.path, 4).pending("7009")
+        os.environ["FAKE_SQUEUE_OUT"] = f"RUNNING|None|{submitted.isoformat(timespec='seconds')}"
+        running = SlurmExecutor(cz.path, 4).pending("7009")
+        check("(issue 14) a pending job's reason and wait, from squeue", wait and wait["reason"] == "Priority"
+              and round(wait["hours"], 1) == 2.0 and running is None, str(wait))
+        os.environ.pop("FAKE_SQUEUE_OUT")
+
+        # (issue 16) the generation job's submit check retries, keeps the errors, and isn't a node fault.
+        def generate_job(fail):
+            (fake / "count").write_text("0")
+            env = dict(os.environ, FAKE_SBATCH_FAIL=str(fail), AFAR_SUBMIT_CHECK_DELAYS="0 0 0", AFAR_REPO=str(ROOT),
+                       AFAR_CAMPAIGN=str(c.path), AFAR_GENERATION="1", SLURM_JOB_ID="selftest")
+            return subprocess.run(["bash", str(ROOT / "slurm" / "campaign_generate.sbatch")], env=env,
+                                  capture_output=True, text=True, timeout=300)
+        out = generate_job(2)
+        check("(issue 16) a submit check that fails twice is retried", out.returncode == 0
+              and out.stderr.count("submit check: sbatch --test-only failed: sbatch: error: Batch job submission "
+                                   "failed: Socket timed out") == 2 and out.stdout.rstrip().endswith("done"),
+              f"exit {out.returncode}")
+        out = generate_job(4)
+        check("(issue 16) four failed checks: exit 1, not a node fault", out.returncode == 1
+              and out.stderr.count("submit check: sbatch --test-only failed") == 4
+              and "failed 4 times" in out.stderr, f"exit {out.returncode}")
         for k in ("PATH", "FAKE_SBATCH_FAIL", "FAKE_SBATCH_REJECT"):
             os.environ.pop(k, None) if saved[k] is None else os.environ.__setitem__(k, saved[k])
         SlurmExecutor.retry_delays = saved_globals[3]
@@ -1054,6 +1381,38 @@ def selftest(keep=False):
         os.environ["AFAR_LLM_API_BASE"] = f"http://127.0.0.1:{port + 1}/v1"
         ends("no-progress", "halted", "no_progress", generation=1, max_failed_generations=1)
         os.environ["AFAR_LLM_API_BASE"] = f"http://127.0.0.1:{port}/v1"
+
+        # (issue 15) generation 1's job waits (held) until the campaign is past max_wall_hours: when it
+        # starts, it ends the campaign without the model, instead of running one more generation.
+        cw = start(variant("late", generations=2, max_wall_hours=1), name="selftest-late", executor="local")
+        (cw.path / "faults.json").write_text(json.dumps({"generate_hold": [1]}))
+        drain_local(cw)
+        held = cw.status["stage_job"]
+        check("(issue 15) a held generation job waits, alive", cw.status["stage"] == "generating"
+              and cw.executor().alive([held]) == [held] and generate(Campaign(cw.path), 1, needs_llm=True) == 0,
+              f"{cw.status['stage']} {cw.status['generation']}, {cw.executor().pending(held)}")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            show_status(Campaign(cw.path))
+        waiting = [l.strip() for l in out.getvalue().splitlines() if "waiting:" in l]
+        check("(issue 14) campaign-status shows why the stage job waits", read_json(cw.path / "heartbeat.json")
+              .get("waiting", {}).get("reason") == "JobHeldUser" and len(waiting) == 1
+              and f"job {held} was pending 0.0 h (JobHeldUser) at the last heartbeat" in waiting[0],
+              waiting[0] if waiting else "no waiting line")
+        meta = read_json(cw.path / "campaign.json")      # as if the job waited 2 h in the queue
+        meta["created_at"] = (datetime.datetime.now(datetime.timezone.utc)
+                              - datetime.timedelta(hours=2)).isoformat(timespec="seconds")
+        results.write_atomic(cw.path / "campaign.json", meta)
+        needs_llm = generate(Campaign(cw.path), 1, needs_llm=True)
+        cw.executor().release(held)
+        drain_local(cw)
+        st = cw.status
+        check("(issue 15) a generation job that starts late ends the campaign", needs_llm == 1
+              and st["state"] == "finished" and st.get("reason") == "wall_time"
+              and "when generation 1's job started" in st.get("message", "")
+              and not (cw.gen_dir(1) / "generation.json").exists()
+              and not any(s["stage"] == "evaluate" and s["generation"] == 1 for s in cw.executor().submitted),
+              f"needs model: {needs_llm == 0}; {st['state']} ({st.get('reason')}): {(st.get('message') or '')[:60]}")
 
         # (M6 f) stop --now cancels the stage's jobs and halts at once: no retry, no mail.
         cn = start(variant("now", generations=1), name="selftest-now", executor="local")

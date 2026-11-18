@@ -10,7 +10,10 @@
 # the seed and three built-in policies on smoke-v1. Choose what to run with:
 #     sbatch --export=ALL,MANIFEST=smoke-v1,TARGETS="baseline seeds/evolved_repl.h" slurm/evaluate.sbatch
 # TARGETS entries: baseline | selftest | builtin:<module> | <candidate header path>
-# FORCE=1 re-evaluates targets that already have a summary.
+# FORCE=1 re-evaluates targets that already have a summary. OUT_ROOT=<dir> writes each
+# target's records to <dir>/<file name> instead, leaving earlier records untouched (for
+# example, to compare a campaign's candidates on another number of CPUs):
+#     sbatch --cpus-per-task=8 --mem=8G --time=04:30:00 --export=ALL,MANIFEST=crc2-evolve-v1,TARGETS=<campaign>/generations/6/candidates/<id>.h,OUT_ROOT=$AFAR_RESULTS/checks/cpus-8 slurm/evaluate.sbatch
 #
 # Results: $AFAR_RESULTS/baselines/<experiment>/ and
 #          $AFAR_RESULTS/evaluations/<experiment>/<policy>/<candidate id>/summary.json
@@ -47,7 +50,11 @@ for target in $targets; do
         builtin:*) args=(--manifest "$manifest" --builtin "${target#builtin:}") ;;
         *)         args=(--manifest "$manifest" --candidate "$target") ;;
     esac
-    "$py" -m evaluator.evaluate_candidate "${args[@]}" --cxx "$AFAR_CXX" --jobs "$jobs" ${FORCE:+--force} &
+    out=()
+    if [[ -n "${OUT_ROOT:-}" ]]; then
+        out=(--out "${OUT_ROOT}/$(basename "${target#builtin:}" .h)")
+    fi
+    "$py" -m evaluator.evaluate_candidate "${args[@]}" --cxx "$AFAR_CXX" --jobs "$jobs" ${FORCE:+--force} ${out[@]+"${out[@]}"} &
     wait $!
 done
 echo "done"

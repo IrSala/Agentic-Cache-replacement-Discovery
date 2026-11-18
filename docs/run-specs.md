@@ -27,6 +27,9 @@ iterations: 10
 overrides: {}                       # optional dotted OpenEvolve keys, applied last, e.g. database.num_islands: 2
 ```
 
+**Optional evaluator settings:**
+- `duplicate_screen: {trace, audit_every}`: run one trace, or a list of them, first and reuse a known behavior's scores when they match. It's for campaigns using `champsim_ipc`, and off when absent (`docs/levers/evaluation/duplicate-screen.md`).
+
 **Other ways to name a part:**
 - **Raw OpenEvolve evaluators:** a spec can name one instead of a policy, with `evaluator.openevolve_file`, `timeout_s` and optional `openevolve:` settings. `toy-v1` does this for OpenEvolve's example.
 - **Profiles by path:** any profile can be named by a path (a value containing `/`) instead of a name. That's handy for an experiment that isn't ready to become a named profile.
@@ -41,7 +44,7 @@ overrides: {}                       # optional dotted OpenEvolve keys, applied l
 
 | Part | Where | What it holds | Today |
 |---|---|---|---|
-| Model | `configs/models/<name>.env` (shell), after the shared `configs/llm/vllm.env` | The fields below this table | `qwen2.5-coder-7b-v1`; `fake-v1` (the stand-in server, no GPU) |
+| Model | `configs/models/<name>.env` (shell), after the shared `configs/llm/vllm.env` | The fields below this table | `qwen2.5-coder-7b-v1`; `qwen3.6-27b-fp8-v1` (served by `llm_ping` and `llm_replay` so far, not yet by a campaign: `docs/llm-serving.md`, `docs/levers/generation/model.md`); `fake-v1` (the stand-in server, no GPU) |
 | Prompt | `configs/prompts/<name>/` | `prompt.yaml`: `description`, `requires` (`champsim_commit`, `module_name`) and `openevolve:` (`prompt.*` settings). Also `system_message.txt` and any OpenEvolve template overrides, named after OpenEvolve's templates (`full_rewrite_user.txt`, ...) | `champsim-rewrite-v1`, `toy-v1` |
 | Search | `configs/search/<name>.yaml` | `description`, plus `openevolve:` with top-level and `database.*` settings, such as islands, population and diff vs full rewrite | `champsim-rewrite-v1`, `toy-v1` |
 | Evaluator policy | `evaluator/policies/<module>.py`, registered in `evaluator/policies/__init__.py` | the `static_check → build → run → score` stages, plus the metadata and methods listed under the table | `compile_only`, `champsim_ipc` |
@@ -91,6 +94,8 @@ overrides: {}                       # optional dotted OpenEvolve keys, applied l
 - the prompt's `requires` match the manifest
 - `max_tokens` is less than the context window
 - `parallel_candidates × cpus_per_candidate + 2` fits the job's CPUs
+
+**Choosing `cpus_per_candidate` for a campaign.** A candidate's traces run longest first, so it can finish as soon as its slowest trace on fewer CPUs than it has traces. Use the smallest number for which `make campaign-estimate SPEC=<name>` doesn't show a longer candidate time; its efficiency figure shows what share of the CPUs the simulations use. For `crc2-evolve-v1`, that's 8 of 14 (`docs/campaigns.md` §8).
 
 **Equivalence with R6 and R7.** OpenEvolve loaded each old hand-written YAML and the resolved config of its spec, and every field was compared. They differ only where intended:
 
@@ -182,6 +187,7 @@ AFAR_LLM_FAKE=1 AFAR_CXX=<Spack g++ 12> SLURM_JOB_ID=12345 SLURM_SUBMIT_DIR=$PWD
 | Search settings | Copy `configs/search/champsim-rewrite-v1.yaml` and edit it |
 | An evaluator policy | Write a `Policy` subclass with its two flags, `time_limit_s` and `preflight`, and add it to `REGISTRY`. `make evaluate-selftest` then runs the contract cases on it: seed → `completed` 1.0; forbidden call and edits outside the block → `invalid_candidate`; syntax error → `compile_failed` |
 | A run | Write `configs/runs/<name>.yaml` naming the parts, then run `make oe-check SPEC=<name>` |
+| A lever (an optimization or a research change) | Decide from its effect on results whether it needs a run-spec switch: none if it's result-identical by construction; a field, off by default, if it's result-identical only when an assumption holds; always a field or part if it changes results (`docs/levers/README.md`). Record what you learn in `docs/levers/<stage>/<lever>.md` |
 
 ## 6. Background
 
